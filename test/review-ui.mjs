@@ -284,12 +284,42 @@ await test('subtree coverage diagnostics are visible and actionable without beco
     const menu = manifest.contributes.menus['view/item/context'].find(entry =>
         entry.command === 'diffTracker.excludeCoverageSubtree');
     assert.match(menu.when,/coverageDiagnosticSubtree/);
-    assert.equal(menu.group,'inline','inline contribution also appears in right-click context menu');
+    assert.equal(menu.group,'inline','coverage diagnostics retain their hover action');
 
     assert.match(diagnostic.children[0].tooltip, /Imported directory watcher failed/);
     assert.equal(roots.some(item => item.label === 'Pending Review'), false,
         'coverage diagnostics must not fabricate a file review summary');
 });
+
+// VS Code TreeMenus separates group `inline` (primary/hover) from all other
+// groups (secondary/right-click). One contribution does not provide both.
+// https://github.com/microsoft/vscode/blob/1.80.2/src/vs/workbench/browser/parts/views/treeView.ts#L1500-L1522
+for (const [command, contextValue] of [
+    ['diffTracker.excludeCoverageSubtree', 'coverageDiagnosticSubtree'],
+    ['diffTracker.acceptFile', 'changedFile'],
+    ['diffTracker.revertFile', 'changedFile'],
+    ['diffTracker.acknowledgeOpaqueChange', 'opaqueFile'],
+    ['diffTracker.resetUnknownBaseline', 'unknownFile']
+]) {
+    await test(`${command} has distinct scoped hover and right-click contributions`, () => {
+        const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        const entries = manifest.contributes.menus['view/item/context']
+            .filter(item => item.command === command);
+        assert.equal(entries.length, 2, 'exactly one entry per menu surface');
+        for (const entry of entries) {
+            assert.equal(entry.when,
+                `view == diffTracker.changesView && viewItem == ${contextValue}`,
+                'both surfaces must retain the same owning view and row category');
+        }
+        assert.equal(entries.filter(item => item.group === 'inline').length, 1,
+            'one primary hover action');
+        assert.equal(entries.filter(item => item.group && item.group.split('@')[0] !== 'inline').length, 1,
+            'one secondary right-click action, separate from the hover contribution');
+        const declarations = manifest.contributes.commands.filter(item => item.command === command);
+        assert.equal(declarations.length, 1, 'both surfaces reuse one command/handler');
+        assert.ok(declarations[0].icon, 'the hover action retains its icon');
+    });
+}
 
 await test('coverage exclude quick action stages an exact root-local request without Apply',async()=>{
     const h=harness(null);
@@ -1537,11 +1567,11 @@ await test('opaque exposes Acknowledge and unknown exposes explicit Baseline Res
     const items=manifest.contributes.menus['view/item/context'];
     const opaqueCommands=items
         .filter(item=>(item.when??'').includes('viewItem == opaqueFile'))
-        .map(item=>item.command).sort();
-    assert.deepEqual(opaqueCommands,['diffTracker.acknowledgeOpaqueChange','diffTracker.showWebviewDiff']);
+        .map(item=>item.command);
+    assert.deepEqual([...new Set(opaqueCommands)].sort(),['diffTracker.acknowledgeOpaqueChange','diffTracker.showWebviewDiff']);
     const unknownCommands=items
         .filter(item=>(item.when??'').includes('viewItem == unknownFile'))
-        .map(item=>item.command).sort();
-    assert.deepEqual(unknownCommands,['diffTracker.resetUnknownBaseline','diffTracker.showWebviewDiff']);
+        .map(item=>item.command);
+    assert.deepEqual([...new Set(unknownCommands)].sort(),['diffTracker.resetUnknownBaseline','diffTracker.showWebviewDiff']);
 });
 console.log(`${count} production review UI cases passed (VS Code, DOM and renderer boundaries mocked).`);
