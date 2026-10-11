@@ -6,7 +6,7 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 
 [English](./README.md)
 
-本文描述 `0.8.2` 源码，增加归档 Git 审阅恢复，并改进监控范围与审阅操作的安全校验。源码版本不代表新版本已发布；最终 VSIX 的核验要求见[发布门禁](docs/releasing.md)。
+本文描述 `0.8.3` 源码，补齐覆盖目录和文件审阅操作的右键入口。源码版本不代表新版本已发布；最终 VSIX 的核验要求见[发布门禁](docs/releasing.md)。
 
 > 本 fork 的扩展 ID 为 `lengmh.code-diff-tracker`。安装前，请禁用或卸载上游
 > `TinyTigerPan.diff-tracker`，以及此前用于测试的 `lengmh.diff-tracker` VSIX。
@@ -283,7 +283,12 @@ V4 与已发布 `0.7.2` 不兼容，降级恢复必须阻断，不能静默丢�
 
 ## 版本更新摘要
 
-### 0.8.2（发布准备）
+### 0.8.3（发布准备）
+
+- 为覆盖目录排除、文本 Accept/Revert、只读 Acknowledge 和 Unknown Reset Baseline 补齐右键入口；保留现有行内图标、类别限制和安全校验。
+- 分别验证行内按钮与右键菜单贡献，纠正行内按钮会自动出现在右键菜单中的错误测试假设。
+
+### 0.8.2
 
 - 增加命令面板中的 Restore Archived Git Review，支持恢复最近一份兼容的归档；恢复前备份当前审阅，并核对当前文件，不修改工作区文件或 Git 状态。
 - 增加覆盖诊断的目录排除快捷操作，以及按类别区分的文件和文件夹审阅操作；Unknown 基线重置需要明确确认。
