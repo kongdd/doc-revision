@@ -533,9 +533,19 @@
           "group": "inline"
         },
         {
+          "command": "diffTracker.excludeCoverageSubtree",
+          "when": "view == diffTracker.changesView && viewItem == coverageDiagnosticSubtree",
+          "group": "1_actions@1"
+        },
+        {
           "command": "diffTracker.acceptFile",
           "when": "view == diffTracker.changesView && viewItem == changedFile",
           "group": "inline"
+        },
+        {
+          "command": "diffTracker.acceptFile",
+          "when": "view == diffTracker.changesView && viewItem == changedFile",
+          "group": "1_actions@1"
         },
         {
           "command": "diffTracker.openOriginalFile",
@@ -553,6 +563,11 @@
           "group": "inline"
         },
         {
+          "command": "diffTracker.revertFile",
+          "when": "view == diffTracker.changesView && viewItem == changedFile",
+          "group": "1_actions@2"
+        },
+        {
           "command": "diffTracker.showWebviewDiff",
           "when": "view == diffTracker.changesView && viewItem == changedFile",
           "group": "2_review@4"
@@ -563,6 +578,11 @@
           "group": "inline"
         },
         {
+          "command": "diffTracker.acknowledgeOpaqueChange",
+          "when": "view == diffTracker.changesView && viewItem == opaqueFile",
+          "group": "1_actions@1"
+        },
+        {
           "command": "diffTracker.showWebviewDiff",
           "when": "view == diffTracker.changesView && viewItem == opaqueFile",
           "group": "2_review@1"
@@ -571,6 +591,11 @@
           "command": "diffTracker.resetUnknownBaseline",
           "when": "view == diffTracker.changesView && viewItem == unknownFile",
           "group": "inline"
+        },
+        {
+          "command": "diffTracker.resetUnknownBaseline",
+          "when": "view == diffTracker.changesView && viewItem == unknownFile",
+          "group": "1_actions@1"
         },
         {
           "command": "diffTracker.showWebviewDiff",
