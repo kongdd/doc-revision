@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.3
+
+- Add the missing right-click alternatives for coverage-subtree exclusion, text Accept/Revert, read-only Acknowledge, and Unknown Reset Baseline. Retain the existing inline icons, row-category restrictions and shared safety-checked handlers.
+- Correct menu regression coverage to verify inline and right-click contributions separately; inline actions are not automatically included in the context menu.
+
 ## 0.8.2
 
 - Add **Restore Archived Git Review** to the Command Palette. Restore the most recent Archive & Rebuild review, when compatible, after confirming replacement, with a separate pre-restore backup and current-file reconciliation. Active and stopped sessions are supported; workspace files and Git state are not modified.
