@@ -56,17 +56,86 @@ export type GitContextEvent =
     | { kind: 'removed'; repoRoot: string }
     | { kind: 'ready'; contexts: GitContextSnapshot[] };
 
-function hasUnfinishedGitOperation(repoRoot: string): boolean {
+/** Bound synchronous metadata reads used by the final Keep transaction guard. */
+function readGitMetadata(file: string, limit = 65536): string {
+    const descriptor = fs.openSync(file, 'r');
     try {
-        let gitDir = path.join(repoRoot, '.git');
-        const stat = fs.statSync(gitDir);
-        if (stat.isFile()) {
-            if (stat.size > 65536) { return true; }
-            const match = /^gitdir: (.+?)(?:\r?\n)?$/.exec(fs.readFileSync(gitDir, 'utf8'));
-            if (!match) { return true; }
-            gitDir = path.resolve(repoRoot, match[1]);
-        } else if (!stat.isDirectory()) { return true; }
-        if (!fs.statSync(gitDir).isDirectory()) { return true; }
+        const stat = fs.fstatSync(descriptor);
+        if (!stat.isFile() || stat.size > limit) { throw new Error('Invalid Git metadata'); }
+        return fs.readFileSync(descriptor, 'utf8');
+    } finally { fs.closeSync(descriptor); }
+}
+
+function resolveGitDirectory(repoRoot: string): string {
+    const entry = path.join(repoRoot, '.git');
+    const stat = fs.statSync(entry);
+    let gitDir = entry;
+    if (stat.isFile()) {
+        const match = /^gitdir: (.+?)(?:\r?\n)?$/.exec(readGitMetadata(entry));
+        if (!match) { throw new Error('Invalid gitfile'); }
+        gitDir = path.resolve(repoRoot, match[1]);
+    } else if (!stat.isDirectory()) { throw new Error('Invalid Git directory'); }
+    if (!fs.statSync(gitDir).isDirectory()) { throw new Error('Missing Git directory'); }
+    return gitDir;
+}
+
+function optionalGitMetadata(file: string, limit?: number): string | undefined {
+    try { return readGitMetadata(file, limit); }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
+        throw error;
+    }
+}
+
+function validBranchRef(ref: string): boolean {
+    return ref.startsWith('refs/heads/') && !/[\x00-\x20\x7f~^:?*\[\\]/.test(ref)
+        && !ref.includes('..') && !ref.includes('@{') && !ref.endsWith('.')
+        && ref.split('/').every(part => !!part && !part.startsWith('.') && !part.endsWith('.lock'));
+}
+
+function resolveGitMetadata(repoRoot: string): { gitDir: string; commonDir: string; identity: string } {
+    const gitDir = resolveGitDirectory(repoRoot);
+    const common = optionalGitMetadata(path.join(gitDir, 'commondir'));
+    if (common !== undefined && !/^.+?(?:\r?\n)?$/.test(common)) { throw new Error('Invalid commondir'); }
+    const commonDir = common === undefined ? gitDir : path.resolve(gitDir, common.replace(/\r?\n$/, ''));
+    if (!fs.statSync(commonDir).isDirectory()) { throw new Error('Missing common directory'); }
+    const identity = JSON.stringify([fs.realpathSync(gitDir), fs.realpathSync(commonDir)]);
+    return { gitDir, commonDir, identity };
+}
+
+function readDiskHead(repoRoot: string): { headName?: string; headCommit: string; identity: string } {
+    const { gitDir, commonDir, identity } = resolveGitMetadata(repoRoot);
+    const head = readGitMetadata(path.join(gitDir, 'HEAD')).replace(/\r?\n$/, '');
+    const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+    if (oid.test(head)) { return { headCommit: head, identity }; }
+    const ref = head.startsWith('ref: ') ? head.slice(5) : '';
+    if (!validBranchRef(ref)) { throw new Error('Unknown HEAD'); }
+    const loose = optionalGitMetadata(path.join(commonDir, ...ref.split('/')));
+    if (loose !== undefined) {
+        const commit = loose.replace(/\r?\n$/, '');
+        if (!oid.test(commit)) { throw new Error('Unknown branch ref'); }
+        return { headName: ref.slice('refs/heads/'.length), headCommit: commit, identity };
+    }
+    const packed = optionalGitMetadata(path.join(commonDir, 'packed-refs'), 16 * 1024 * 1024);
+    let commit: string | undefined;
+    for (const line of (packed ?? '').split(/\r?\n/)) {
+        if (!line || line.startsWith('#') || /^\^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(line)) { continue; }
+        const match = /^([0-9a-f]{40}|[0-9a-f]{64}) (refs\/\S+)$/.exec(line);
+        if (!match) { throw new Error('Invalid packed refs'); }
+        if (match[2] === ref) {
+            if (commit) { throw new Error('Duplicate packed ref'); }
+            commit = match[1];
+        }
+    }
+    if (!commit) { throw new Error('Missing branch ref'); }
+    return { headName: ref.slice('refs/heads/'.length), headCommit: commit, identity };
+}
+
+function hasUnfinishedGitOperation(repoRoot: string, expectedIdentity?: string): boolean {
+    try {
+        const metadata = expectedIdentity === undefined ? undefined : resolveGitMetadata(repoRoot);
+        if (metadata && metadata.identity !== expectedIdentity) { return true; }
+        const gitDir = metadata?.gitDir ?? resolveGitDirectory(repoRoot);
         // These belong to the worktree gitdir, never its shared commondir.
         // mergeChanges only contains conflicts, not a clean --no-commit merge.
         for (const marker of ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'sequencer']) {
@@ -119,6 +188,13 @@ export function compareGitContexts(baseline: GitContextSnapshot, current: GitCon
     return baseline.headCommit === current.headCommit
         ? { compatible: true }
         : { compatible: false, reason: 'Git unborn or unnamed HEAD identity changed' };
+}
+
+/** Baseline-only text acceptance may cross named branches, never uncertain Git states. */
+export function canKeepAcrossGitBranches(baseline: GitContextSnapshot, current: GitContextSnapshot): boolean {
+    return baseline.repoRoot === current.repoRoot && baseline.kind === current.kind &&
+        !baseline.inProgress && !current.inProgress && !baseline.detached && !current.detached &&
+        !!baseline.headName && !!current.headName && !!baseline.headCommit && !!current.headCommit;
 }
 
 export class GitContextMonitor implements vscode.Disposable {
@@ -259,13 +335,45 @@ export class GitContextMonitor implements vscode.Disposable {
             .sort((left, right) => left.repoRoot.localeCompare(right.repoRoot));
     }
 
+    /** Fail closed until the extension's cached HEAD agrees with current on-disk Git metadata.
+     * No async Git status/event can substitute for this synchronous final transaction guard.
+     * Sample HEAD and operation markers twice to reject changes during metadata reads.
+     * This is a bounded stability check, not an atomic lock against external Git processes.
+     */
+    public getVerifiedSnapshots(): GitContextSnapshot[] | undefined {
+        if (!this.isReady()) { return undefined; }
+        const snapshots: GitContextSnapshot[] = [];
+        for (const repository of this.repositories.values()) {
+            // Preserve even an unverifiable nested owner: dropping it could allow
+            // the enclosing healthy repository to authorize Keep for its files.
+            let snapshot: GitContextSnapshot = {
+                repoRoot: repository.rootUri.fsPath, kind: repository.kind ?? 'repository',
+                detached: false, inProgress: true
+            };
+            try {
+                const before = readDiskHead(repository.rootUri.fsPath);
+                snapshot = snapshotGitRepository(repository);
+                const after = readDiskHead(repository.rootUri.fsPath);
+                // An operation can start during the second HEAD read without changing
+                // HEAD (e.g. merge --no-commit). Close that sampling gap at the same gitdir.
+                const operationAfter = hasUnfinishedGitOperation(repository.rootUri.fsPath, after.identity);
+                if (operationAfter || before.identity !== after.identity
+                    || before.headName !== after.headName || before.headCommit !== after.headCommit
+                    || snapshot.headName !== after.headName || snapshot.headCommit !== after.headCommit
+                    || snapshot.detached !== !after.headName) { snapshot.inProgress = true; }
+            } catch { snapshot.inProgress = true; }
+            snapshots.push(snapshot);
+        }
+        return snapshots.sort((left, right) => left.repoRoot.localeCompare(right.repoRoot));
+    }
+
     public getSnapshot(repoRoot: string): GitContextSnapshot | undefined {
         const repository = this.repositories.get(repoRoot);
         return repository ? snapshotGitRepository(repository) : undefined;
     }
 
     public isReady(): boolean {
-        return this.ready;
+        return !this.disposed && this.ready && this.api?.state === 'initialized';
     }
 
     public dispose(): void {

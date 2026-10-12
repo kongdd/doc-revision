@@ -1,3 +1,5 @@
+import { registerKeepCountSnapshot } from './keep-count-snapshot.mjs';
+import { registerCrossBranchKeep } from './cross-branch-keep.mjs';
 import { registerArchivedGitReview } from './archived-git-review.mjs';
 import { registerPR12BoundedInvariants } from './pr12-bounded-invariants.mjs';
 import { registerNativeReviewInvariants } from './native-review-invariants.mjs';
@@ -5683,6 +5685,14 @@ registerPR12BoundedInvariants({
     fireConfigurationChanged: key => configurationChanged({
         affectsConfiguration: name => name === key
     })
+});
+
+registerKeepCountSnapshot({ test, root, file, seed, scan, getTracker: () => tracker });
+
+registerCrossBranchKeep({
+    test, Uri, DiffTracker, vscode, file, document, pause,
+    getTracker: () => tracker, setTracker: value => { tracker = value; },
+    setListedFiles: value => { listedFiles = value; }
 });
 
 registerArchivedGitReview({

@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import ignore, { Ignore } from 'ignore';
-import { compareGitContexts, GitContextSnapshot } from './gitContext';
+import { canKeepAcrossGitBranches, compareGitContexts, GitContextSnapshot } from './gitContext';
 import { asciiCaseFold, detectLocalPathCaseSensitivity, PathIdentityWorkBudget, resolveRelativePathIdentity, sameExistingDirectoryEntry } from './utils/pathIdentity';
 import { cachedExclusionDirectoryCaseSensitivity, CanonicalMonitoringScope, configuredScopeExplicitlyExcludesSubtree, createLegacyEffectiveScope, detectScopeExpansion, EffectiveMonitoringScope, evaluateConfiguredScope, isHardUnmonitorableRelativePath, parseEffectiveMonitoringScope, validateAndCanonicalizeScope, WorkspaceRootIdentity } from './monitoringScope';
 
@@ -253,6 +253,8 @@ interface BaselineTransaction {
     epoch: number;
     valid?: () => boolean;
     observedEvents?: Map<string, StartupEvent>;
+    keepRecovery?: { payload: Uint8Array; digest: string; prepared: boolean };
+    durablyCommitted?: boolean;
     rollback: () => void;
     done: Promise<void>;
     finish: () => void;
@@ -341,6 +343,8 @@ export interface MixedBatchActionResult extends BatchActionResult {
 }
 
 export interface ReviewToken {
+    /** Live Git context at review/confirmation time; only text Keep consumes this. */
+    keepGitContextSignature?: string;
     filePath: string;
     epoch: number;
     baselineRevision: string;
@@ -444,7 +448,7 @@ export class DiffTracker {
 
     private endBaselineTransaction(transaction: BaselineTransaction, commit: boolean): void {
         if (this.baselineTransaction !== transaction) { return; }
-        if (!commit) { transaction.rollback(); }
+        if (!commit && !transaction.durablyCommitted) { transaction.rollback(); }
         this.baselineTransaction = undefined;
         transaction.finish();
     }
@@ -483,6 +487,12 @@ export class DiffTracker {
     }
 
     private advanceEpoch(): number {
+        if (this.baselineTransaction?.keepRecovery?.prepared && !this.baselineTransaction.durablyCommitted) {
+            // An in-flight intent write may still finish after cancellation. Do
+            // not let a new baseline overwrite its recovery source before reload.
+            this.recoveryBlocked = true;
+            this.persistenceIssue = 'Text Keep was interrupted during durable preparation; reload to recover the saved review before starting a new baseline.';
+        }
         if (this.baselineTransaction) { this.endBaselineTransaction(this.baselineTransaction, false); }
         this.restoringEpoch = undefined;
         this.initialIgnoreEpoch = undefined;
@@ -519,7 +529,9 @@ export class DiffTracker {
         return {
             filePath, epoch: this.sessionEpoch,
             baselineRevision: this.revision(baseline, this.baselineExistingFiles.has(filePath)),
-            currentRevision: this.revision(change.currentContent, !change.isDeleted)
+            currentRevision: this.revision(change.currentContent, !change.isDeleted),
+            ...(this.gitContextProvider && this.getRepositoryOwner(filePath)
+                ? { keepGitContextSignature: this.observedKeepGitSignature(filePath) } : {})
         };
     }
 
@@ -789,6 +801,8 @@ export class DiffTracker {
     private readonly persistedStateTempFileName = 'session-state.tmp.json';
     private readonly persistedStateBackupFileName = 'session-state.last-good.json';
     private readonly persistedStateArchiveFileName = 'session-state.archive.json';
+    private readonly preKeepFileName = 'session-state.pre-keep.json';
+    private readonly keepIntentFileName = 'session-state.keep-in-progress.json';
     private readonly preRestoreFileName = 'session-state.pre-restore.json';
     private readonly archiveRestoreIntentFileName = 'session-state.restore-in-progress.json';
     // Nested restore discovery may request a durability barrier. During staging
@@ -905,8 +919,17 @@ export class DiffTracker {
         const epoch = this.advanceEpoch();
         this.restoringEpoch = epoch;
         try {
-            const interrupted = await this.readArchiveRestoreIntent();
+            const keepInterrupted = await this.readKeepIntent();
+            const archiveInterrupted = await this.readArchiveRestoreIntent();
             if (!this.isCurrentEpoch(epoch)) { return 'blocked'; }
+            if (keepInterrupted.kind !== 'absent' && archiveInterrupted.kind !== 'absent') {
+                this.recoveryBlocked = true;
+                this.persistenceIssue = 'Multiple interrupted baseline operations require preserving extension storage before recovery.';
+                return 'blocked';
+            }
+            if (keepInterrupted.kind === 'absent') { this.cleanupResolvedKeepBackup(); }
+            const recoveringKeep = keepInterrupted.kind !== 'absent';
+            const interrupted = recoveringKeep ? keepInterrupted : archiveInterrupted;
             if (interrupted.kind === 'invalid') {
                 this.recoveryBlocked = true;
                 this.persistenceIssue = interrupted.reason;
@@ -919,8 +942,11 @@ export class DiffTracker {
                     this.recoveryBlocked = true;
                     return 'blocked';
                 }
-                await this.deletePersistedFile(this.getPersistedStateUri(this.archiveRestoreIntentFileName)!);
-                this.persistenceIssue = 'An interrupted archived review restore was rolled back to the pre-restore session. The original archive is unchanged.';
+                await this.deletePersistedFile(this.getPersistedStateUri(recoveringKeep ? this.keepIntentFileName : this.archiveRestoreIntentFileName)!);
+                if (recoveringKeep) { this.cleanupResolvedKeepBackup(); }
+                this.persistenceIssue = recoveringKeep
+                    ? 'An interrupted text Keep was rolled back to its saved before-images; review remains pending.'
+                    : 'An interrupted archived review restore was rolled back to the pre-restore session. The original archive is unchanged.';
                 return outcome === 'incomplete' ? 'incomplete' : 'recovered';
             }
             return await this.restorePersistedStateForEpoch(epoch);
@@ -1354,7 +1380,8 @@ export class DiffTracker {
     }
 
     public startRecording(): boolean {
-        if (this.disposed || this.recoveryBlocked || this.archiveRestoreTask) { return false; }
+        if (this.disposed || this.recoveryBlocked || this.archiveRestoreTask ||
+            (this.baselineTransaction?.keepRecovery?.prepared && !this.baselineTransaction.durablyCommitted)) { return false; }
         const identityIssue = this.getPathIdentityIssue();
         if (identityIssue) {
             vscode.window.showWarningMessage(`Code Diff Tracker: ${identityIssue}. Recording remains paused.`);
@@ -3140,7 +3167,7 @@ export class DiffTracker {
         retainFailureMarker = false
     ): Promise<boolean> {
         const epoch = this.sessionEpoch;
-        retainFailureMarker = retainFailureMarker || this.archiveRestoreFinalizingEpoch === epoch;
+        retainFailureMarker = retainFailureMarker || this.archiveRestoreFinalizingEpoch === epoch || !!transaction?.keepRecovery;
         if (this.archiveRestoreStaging && !transaction) { return true; }
         if (transaction && (this.baselineTransaction !== transaction || !this.isCurrentEpoch(transaction.epoch))) { return false; }
         if (this.baselineTransaction && !transaction) {
@@ -5695,7 +5722,15 @@ export class DiffTracker {
 
     public isRecoveryBlocked(): boolean { return this.recoveryBlocked; }
 
-    public async discardRecoveryState(): Promise<boolean> {
+    public discardRecoveryState(): Promise<boolean> {
+        // Refuse an active archive restore before joining its queue.
+        if (this.archiveRestoreTask) { return Promise.resolve(false); }
+        // In-flight Keep intent writes must settle before an explicit discard;
+        // otherwise a late marker could resurrect a session the user discarded.
+        return this.queueRecoveryAction(() => this.performDiscardRecoveryState());
+    }
+
+    private async performDiscardRecoveryState(): Promise<boolean> {
         if (this.archiveRestoreTask) { return false; }
         if (!this.storageUri) {
             this.recoveryBlocked = false;
@@ -5703,7 +5738,7 @@ export class DiffTracker {
             return true;
         }
         try {
-            for (const name of [this.persistedStateFileName, this.persistedStateTempFileName, this.persistedStateBackupFileName, this.persistenceFailureFileName, this.archiveRestoreIntentFileName]) {
+            for (const name of [this.persistedStateFileName, this.persistedStateTempFileName, this.persistedStateBackupFileName, this.persistenceFailureFileName, this.archiveRestoreIntentFileName, this.keepIntentFileName, this.preKeepFileName]) {
                 const uri = this.getPersistedStateUri(name);
                 if (uri) { await this.deletePersistedFile(uri); }
             }
@@ -7668,6 +7703,7 @@ export class DiffTracker {
             evidenceChangedDuringFlush = projectionBefore !== projectionAfter;
         } while (version !== this.baselineCompletionVersion || evidenceChangedDuringFlush);
         if (transaction?.valid && !transaction.valid()) { return false; }
+        if (transaction?.keepRecovery && !this.commitPreparedKeepPersistence(transaction)) { return false; }
         this.baselineBuilding = false;
         this._onDidChangeBaselineState.fire('ready');
         return true;
@@ -9114,13 +9150,125 @@ export class DiffTracker {
         });
     }
 
-    private validateActionTarget(filePath: string): string | undefined {
+    private validateActionReadiness(): string | undefined {
         if (this.archiveRestoreTask) { return 'An archived review restore is in progress; review actions are paused'; }
         if (this.restoringEpoch !== undefined) { return 'Session restoration is still reconciling changes; review is paused'; }
         if (this.persistenceFailed) { return 'Session persistence failed; review actions are paused until it can be saved'; }
         if (this.recoveryBlocked) { return 'Session recovery is blocked; preserve or discard the damaged state before review actions'; }
         if (this.baselineBuilding || !this.snapshotInitialized) { return 'Baseline is incomplete; rebuild it before review actions'; }
-        return this.validateSnapshotTarget(filePath);
+        return undefined;
+    }
+
+    private validateActionTarget(filePath: string): string | undefined {
+        return this.validateActionReadiness() ?? this.validateSnapshotTarget(filePath);
+    }
+
+    private validateRevertTarget(filePath: string): string | undefined {
+        const error = this.validateActionTarget(filePath);
+        return error?.startsWith('Git branch changed from ')
+            ? `Revert blocked because the branch differs from the recorded baseline. ${error.split(';')[0]}. Verified text Keep may still be available.`
+            : error;
+    }
+
+    private gitContextProvider: (() => GitContextSnapshot[] | undefined) | undefined;
+
+    public setGitContextProvider(provider: () => GitContextSnapshot[] | undefined): void {
+        this.gitContextProvider = provider;
+    }
+
+    private observedKeepGitSignature(filePath: string): string {
+        const owner = this.getRepositoryOwner(filePath);
+        // Rendering a row/block must not synchronously rescan every repository.
+        // This pins review context only; actions always verify live Git metadata.
+        return JSON.stringify({ owner, current: owner ? this.latestGitContexts.get(owner) : undefined, available: true });
+    }
+
+    private captureKeepGitContext(filePath: string, verified?: { contexts: GitContextSnapshot[] | undefined }): { signature: string; error?: string; crossBranch: boolean } {
+        const owner = this.getRepositoryOwner(filePath);
+        let contexts = verified?.contexts;
+        if (!verified) {
+            try { contexts = this.gitContextProvider?.(); } catch { /* Unknown is not permission. */ }
+        }
+        const current = contexts?.filter(context => this.pathBelongsToRoot(filePath, context.repoRoot))
+            .sort((a, b) => b.repoRoot.length - a.repoRoot.length)[0];
+        const baseline = owner ? this.baselineGitContexts.get(owner) : undefined;
+        const signature = JSON.stringify({ owner, current, available: !!contexts });
+        const result = (error?: string, crossBranch = false) => ({ signature, error, crossBranch });
+        if (this.gitContextPending) { return result('Git initialization and context reconciliation are pending'); }
+        // Preserve ordinary non-Git and legacy same-context behavior. A pause can
+        // only be relaxed with a live authoritative monitor, never cached events.
+        if (!this.gitContextProvider) { return result(this.getGitPauseReason(filePath)); }
+        if (!owner && !current) { return result(); }
+        if (!baseline || !current || current.repoRoot !== owner) {
+            return result('Git repository/worktree ownership is missing or changed');
+        }
+        const strict = compareGitContexts(baseline, current);
+        const paused = this.getGitPauseReason(filePath);
+        if (!strict.compatible || paused) {
+            const observed = this.latestGitContexts.get(owner!);
+            if (!observed || JSON.stringify(observed) !== JSON.stringify(current)) {
+                return result('Git monitoring state is inconsistent; wait for context reconciliation');
+            }
+            if (!canKeepAcrossGitBranches(baseline, current)) {
+                return result(strict.reason ?? paused ?? 'Git branch context cannot be verified');
+            }
+        }
+        return result(undefined, baseline.headName !== current.headName);
+    }
+
+    public getCrossBranchKeepCount(tokens: ReviewToken[]): number {
+        // This synchronous confirmation count shares one verified observation.
+        // No snapshot is retained for an action or across an asynchronous wait.
+        let contexts: GitContextSnapshot[] | undefined;
+        try { contexts = this.gitContextProvider?.(); } catch { /* Fail closed. */ }
+        const verified = { contexts };
+        return new Set(tokens.filter(token => {
+            if (!this.matchesReview(token)) { return false; }
+            const context = this.captureKeepGitContext(token.filePath, verified);
+            return context.crossBranch && !this.validateKeepTarget(token.filePath, token.keepGitContextSignature, false, context);
+        }).map(token => token.filePath)).size;
+    }
+
+    /** Keep changes only saved text before-images. Do not use this for workspace writes or snapshots. */
+    private validateKeepTarget(filePath: string, signature?: string, committing = false, verified?: { signature: string; error?: string; crossBranch: boolean }): string | undefined {
+        const readiness = committing ? undefined : this.validateActionReadiness();
+        if (readiness) { return readiness; }
+        if (this.recoveryBlocked || this.disposed || this.workspaceContextChanged || this.archiveRestoreTask ||
+            this.restoringEpoch !== undefined || this.persistenceFailed) { return 'Review session is unavailable'; }
+        const context = verified ?? this.captureKeepGitContext(filePath);
+        if (context.error) { return `Keep refused: ${context.error}`; }
+        if (signature !== undefined && context.signature !== signature) {
+            return 'Keep refused because review, disk, or Git context became stale';
+        }
+        return this.validateResourceTarget(filePath);
+    }
+
+    private keepHasUnverifiedEvidence(filePath: string): boolean {
+        const tracked = this.trackedChanges.get(filePath);
+        return !!this.coverageGaps.get(filePath)?.file ||
+            !!(tracked && (tracked.reviewKind !== 'text' || tracked.unavailableReason));
+    }
+
+    private keepReviewStillCurrent(review: ReviewToken, signature: string, committing = false): boolean {
+        if (!this.isCurrentEpoch(review.epoch) || this.validateKeepTarget(review.filePath, signature, committing) ||
+            this.hasDirtyDocument(review.filePath)) { return false; }
+        if (!committing && !this.matchesReview(review)) { return false; }
+        if (this.keepHasUnverifiedEvidence(review.filePath)) { return false; }
+        const doc = vscode.workspace.textDocuments.find(value => value.uri.scheme === 'file' &&
+            this.canonicalTrackingPath(value.uri.fsPath) === review.filePath);
+        // The durable commit guard is synchronous. Re-read the bounded text file
+        // here so undelivered watcher/editor events cannot accept stale content.
+        try {
+            const stat = fs.statSync(review.filePath);
+            if (!stat.isFile() || stat.size > 5 * 1024 * 1024) { return false; }
+            const bytes = fs.readFileSync(review.filePath);
+            if (bytes.length > 5 * 1024 * 1024 || this.isLikelyBinaryContent(bytes) ||
+                (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) { return false; }
+            const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            return this.revision(content, true) === review.currentRevision && (!doc || doc.getText() === content);
+        } catch (error) {
+            return this.isFileNotFound(error) && this.revision('', false) === review.currentRevision;
+        }
     }
 
     private validateSnapshotTarget(
@@ -9175,6 +9323,8 @@ export class DiffTracker {
     }
 
     public observeGitContext(context: GitContextSnapshot): string | undefined {
+        const previous = this.latestGitContexts.get(context.repoRoot);
+        const tokenContextChanged = JSON.stringify(previous) !== JSON.stringify(context);
         this.latestGitContexts.set(context.repoRoot, { ...context });
         const baseline = this.baselineGitContexts.get(context.repoRoot);
         if (!baseline) {
@@ -9185,6 +9335,7 @@ export class DiffTracker {
             return reason;
         }
         if (this.pausedGitRepositories.has(context.repoRoot)) {
+            if (tokenContextChanged) { this.emitTrackChangesEvent({ fullRefresh: true }); }
             return undefined;
         }
         const comparison = compareGitContexts(baseline, context);
@@ -9195,9 +9346,11 @@ export class DiffTracker {
             this.schedulePersistState();
             return reason;
         }
-        // Commit movement on the same named branch is informational, not a reset.
+        // Commit movement remains compatible, but token-bearing views must
+        // refresh because action signatures intentionally pin the exact HEAD.
         this.baselineGitContexts.set(context.repoRoot, { ...context });
         this.schedulePersistState();
+        if (tokenContextChanged) { this.emitTrackChangesEvent({ fullRefresh: true }); }
         return undefined;
     }
 
@@ -9234,12 +9387,35 @@ export class DiffTracker {
             .sort((left, right) => left.repoRoot.localeCompare(right.repoRoot));
     }
 
-    private async readArchiveRestoreIntent(): Promise<
+    private cleanupResolvedKeepBackup(): void {
+        const intent = this.getPersistedStateUri(this.keepIntentFileName);
+        const backup = this.getPersistedStateUri(this.preKeepFileName);
+        if (!intent || !backup || intent.scheme !== 'file' || backup.scheme !== 'file') { return; }
+        try {
+            try { fs.statSync(intent.fsPath); return; }
+            catch (error) { if (!this.isFileNotFound(error)) { return; } }
+            fs.unlinkSync(backup.fsPath);
+        } catch (error) {
+            // Cleanup is not part of the durable commit. An orphan without an
+            // intent is inert and retried at startup; never undo a saved Keep.
+            if (!this.isFileNotFound(error)) { console.warn('Could not remove resolved text Keep backup.', error); }
+        }
+    }
+
+    private readKeepIntent() {
+        return this.readBaselineRollbackIntent(this.keepIntentFileName, this.preKeepFileName, 'Text Keep');
+    }
+
+    private readArchiveRestoreIntent() {
+        return this.readBaselineRollbackIntent(this.archiveRestoreIntentFileName, this.preRestoreFileName, 'Archived review');
+    }
+
+    private async readBaselineRollbackIntent(intentFileName: string, backupFileName: string, operation: string): Promise<
         { kind: 'absent' } | { kind: 'invalid'; reason: string } |
         { kind: 'valid'; state: PersistedTrackerState }
     > {
-        const intentUri = this.getPersistedStateUri(this.archiveRestoreIntentFileName);
-        const backupUri = this.getPersistedStateUri(this.preRestoreFileName);
+        const intentUri = this.getPersistedStateUri(intentFileName);
+        const backupUri = this.getPersistedStateUri(backupFileName);
         if (!intentUri || !backupUri) { return { kind: 'absent' }; }
         try {
             const bytes = await vscode.workspace.fs.readFile(intentUri);
@@ -9255,7 +9431,7 @@ export class DiffTracker {
             return { kind: 'valid', state: backup.state };
         } catch (error) {
             if (this.isFileNotFound(error)) { return { kind: 'absent' }; }
-            return { kind: 'invalid', reason: `Archived review recovery is blocked; preserve extension storage: ${String(error)}` };
+            return { kind: 'invalid', reason: `${operation} recovery is blocked; preserve extension storage: ${String(error)}` };
         }
     }
 
@@ -10401,7 +10577,7 @@ export class DiffTracker {
         review: ReviewToken,
         preparedBatch?: PreparedBatchRevert
     ): Promise<ActionResult> {
-        const targetError = this.validateActionTarget(filePath);
+        const targetError = this.validateRevertTarget(filePath);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
         const change = this.trackedChanges.get(filePath);
         if (!change || !this.fileSnapshots.has(filePath)) {
@@ -10433,7 +10609,7 @@ export class DiffTracker {
         // as success only when the session, baseline revision and current bytes
         // still prove the exact reviewed target was restored.
         const current = await this.readCurrentFileState(filePath);
-        const finalTargetError = this.validateActionTarget(filePath);
+        const finalTargetError = this.validateRevertTarget(filePath);
         if (finalTargetError) {
             return this.actionResult(filePath, 'conflict', finalTargetError, result.bufferChanged);
         }
@@ -10470,7 +10646,7 @@ export class DiffTracker {
         if (!this.isCurrentEpoch(epoch)) {
             return this.actionResult(item.filePath, 'cancelled', 'Session changed before recovery');
         }
-        const targetError = this.validateActionTarget(item.filePath);
+        const targetError = this.validateRevertTarget(item.filePath);
         if (targetError) { return this.actionResult(item.filePath, 'conflict', targetError); }
         const baseline = this.fileSnapshots.get(item.filePath);
         if (baseline === undefined || this.revision(baseline, this.baselineExistingFiles.has(item.filePath)) !== item.baselineRevision) {
@@ -10480,7 +10656,7 @@ export class DiffTracker {
         if (!this.isCurrentEpoch(epoch)) {
             return this.actionResult(item.filePath, 'cancelled', 'Session changed during recovery read');
         }
-        const afterReadError = this.validateActionTarget(item.filePath);
+        const afterReadError = this.validateRevertTarget(item.filePath);
         if (afterReadError) { return this.actionResult(item.filePath, 'conflict', afterReadError); }
         if (current.kind === 'unavailable') { return this.actionResult(item.filePath, 'failed', current.reason); }
         const currentState: PersistedFileState = {
@@ -10527,7 +10703,7 @@ export class DiffTracker {
         }
         const canRecover = async (expectedDocument: string): Promise<boolean> => {
             const disk = item.saveMode === 'disk' ? await this.readFileSnapshot(uri) : undefined;
-            return this.isCurrentEpoch(epoch) && !this.validateActionTarget(item.filePath)
+            return this.isCurrentEpoch(epoch) && !this.validateRevertTarget(item.filePath)
                 && this.revision(this.fileSnapshots.get(item.filePath) ?? '', this.baselineExistingFiles.has(item.filePath)) === item.baselineRevision
                 && document.getText() === expectedDocument
                 && (!disk || (disk.kind === 'text' && disk.content === item.after.content));
@@ -10565,7 +10741,7 @@ export class DiffTracker {
                 }
                 return this.actionResult(item.filePath, 'conflict', 'Recovery contents changed during save; recovery retained', true);
             }
-            if (!this.isCurrentEpoch(epoch) || this.validateActionTarget(item.filePath)) {
+            if (!this.isCurrentEpoch(epoch) || this.validateRevertTarget(item.filePath)) {
                 return this.actionResult(item.filePath, 'conflict', 'Session or action target changed during recovery; recovery retained', true);
             }
             this.pendingWriteFiles.delete(item.filePath);
@@ -10626,7 +10802,7 @@ export class DiffTracker {
 
     private ensureRestoreParentDirectories(filePath: string, epoch: number): string | undefined {
         const check = (): string | undefined => !this.isCurrentEpoch(epoch)
-            ? 'Session changed before restoring parent directories' : this.validateActionTarget(filePath);
+            ? 'Session changed before restoring parent directories' : this.validateRevertTarget(filePath);
         const initialError = check();
         if (initialError) { return initialError; }
         const missing: string[] = [];
@@ -10676,20 +10852,20 @@ export class DiffTracker {
                 this.creationTempRoots.add(key);
             }
             if (!this.isCurrentEpoch(epoch)) { return this.actionResult(filePath, 'cancelled', 'Session changed during recovery staging'); }
-            const stagingError = this.validateActionTarget(filePath);
+            const stagingError = this.validateRevertTarget(filePath);
             if (stagingError) { return this.actionResult(filePath, 'conflict', stagingError); }
             const payload = path.join(staging, 'content');
             await fs.promises.writeFile(payload, content, { flag: 'wx', mode: 0o600 });
             await fs.promises.chmod(payload, mode ?? (0o666 & ~process.umask()));
             if (!this.isCurrentEpoch(epoch)) { return this.actionResult(filePath, 'cancelled', 'Session changed before file creation'); }
-            const error = this.validateActionTarget(filePath);
+            const error = this.validateRevertTarget(filePath);
             if (error) { return this.actionResult(filePath, 'conflict', error); }
             // A hard link publishes fully written bytes atomically, failing if any
             // file/symlink already occupies the destination. Never overwrite it.
             await fs.promises.link(payload, filePath);
             published = true;
             const state = await this.readFileSnapshot(vscode.Uri.file(filePath));
-            if (!this.isCurrentEpoch(epoch) || this.validateActionTarget(filePath) ||
+            if (!this.isCurrentEpoch(epoch) || this.validateRevertTarget(filePath) ||
                 state.kind !== 'text' || state.content !== content) {
                 return this.actionResult(filePath, 'conflict', 'Context or content changed during file creation; recovery retained', true);
             }
@@ -10766,7 +10942,7 @@ export class DiffTracker {
             beforeText = doc.getText();
             const edit = new vscode.WorkspaceEdit();
             edit.replace(uri, this.getFullDocumentRange(doc), content);
-            const targetError = this.validateActionTarget(filePath);
+            const targetError = this.validateRevertTarget(filePath);
             if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
             if (!await vscode.workspace.applyEdit(edit)) {
                 bufferChanged = doc.getText() !== beforeText;
@@ -10781,11 +10957,11 @@ export class DiffTracker {
                 this.revision(diskBeforeSave.content, true) !== options.review.currentRevision || doc.getText() !== content)) {
                 return this.actionResult(filePath, 'conflict', 'Disk changed during edit; buffer not saved', true);
             }
-            const saveTargetError = this.validateActionTarget(filePath);
+            const saveTargetError = this.validateRevertTarget(filePath);
             if (saveTargetError) { return this.actionResult(filePath, 'conflict', saveTargetError, true); }
             const saved = await doc.save();
             if (!this.isCurrentEpoch(epoch)) { return this.actionResult(filePath, 'cancelled', 'Session changed during save', true); }
-            const afterSaveError = this.validateActionTarget(filePath);
+            const afterSaveError = this.validateRevertTarget(filePath);
             if (afterSaveError) { return this.actionResult(filePath, 'conflict', afterSaveError, true); }
             if (!saved) {
                 this.markFileUnavailable(filePath, 'Editor buffer changed but saving failed; pending review retained');
@@ -10819,7 +10995,7 @@ export class DiffTracker {
         }
         try {
             if (review && !await this.verifyReview(review)) { return this.actionResult(filePath, 'conflict', 'Review changed before deletion'); }
-            const targetError = this.validateActionTarget(filePath);
+            const targetError = this.validateRevertTarget(filePath);
             if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
             // Like recovery deletion, this cannot be guarded by an expected file
             // version across an asynchronous WorkspaceEdit. Never dispatch it.
@@ -10904,7 +11080,7 @@ export class DiffTracker {
     }
 
     private async revertBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken): Promise<ActionResult> {
-        const targetError = this.validateActionTarget(filePath);
+        const targetError = this.validateRevertTarget(filePath);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
         const originalContent = this.fileSnapshots.get(filePath);
 
@@ -10980,13 +11156,13 @@ export class DiffTracker {
             const fullRange = this.getFullDocumentRange(doc);
             edit.replace(uri, fullRange, nextText);
 
-            const targetError = this.validateActionTarget(filePath);
+            const targetError = this.validateRevertTarget(filePath);
             if (targetError || !await this.verifyReview(review) || doc.isDirty || doc.getText() !== beforeText) {
                 await this.removeRevertRecord(recoveryRecord);
                 recoveryRecord = undefined;
                 return this.actionResult(filePath, 'conflict', targetError ?? 'Review or document changed while persisting recovery');
             }
-            const beforeEditError = this.validateActionTarget(filePath);
+            const beforeEditError = this.validateRevertTarget(filePath);
             if (beforeEditError) {
                 await this.removeRevertRecord(recoveryRecord);
                 recoveryRecord = undefined;
@@ -10998,7 +11174,7 @@ export class DiffTracker {
             if (!this.isCurrentEpoch(review.epoch)) {
                 return this.actionResult(filePath, 'cancelled', 'Session changed during block edit', doc.getText() !== beforeText);
             }
-            const afterEditError = this.validateActionTarget(filePath);
+            const afterEditError = this.validateRevertTarget(filePath);
             if (afterEditError || !this.matchesReview(review)) {
                 const bufferChanged = doc.getText() !== beforeText;
                 if (!bufferChanged) {
@@ -11060,10 +11236,18 @@ export class DiffTracker {
      */
     public keepBlock(filePath: string, blockRef: string | number, token = this.getReviewToken(filePath)): Promise<ActionResult> {
         filePath = this.canonicalTrackingPath(filePath);
-        return this.queueRecoveryAction(() => this.queueFileAction(filePath, token, review => this.keepBlockReviewed(filePath, blockRef, review)));
+        const context = this.captureKeepGitContext(filePath);
+        const signature = token?.keepGitContextSignature ?? context.signature;
+        return this.queueRecoveryAction(() => this.queueFileAction(filePath, token,
+            review => this.keepBlockReviewed(filePath, blockRef, review, signature)));
     }
 
-    private beginKeepTransaction(filePath: string): BaselineTransaction {
+    private beginKeepTransaction(filePath: string, review: ReviewToken, signature: string): BaselineTransaction {
+        const needsRecovery = !!(this.storageUri && this.gitContextProvider && this.getRepositoryOwner(filePath));
+        const previousState = needsRecovery ? this.buildPersistedState() : undefined;
+        if (needsRecovery && (!previousState || !this.parsePersistedState(previousState))) {
+            throw new Error('The complete pre-Keep session cannot be verified');
+        }
         const content = this.fileSnapshots.get(filePath)!;
         const mode = this.fileModes.get(filePath);
         const exists = this.baselineExistingFiles.has(filePath);
@@ -11085,7 +11269,13 @@ export class DiffTracker {
             this.updateTrackedDiff(filePath, currentContent, { baselineChanged: true, currentExists });
             if (latest?.unavailableReason) { this.markFileUnavailable(filePath, latest.unavailableReason); }
         });
-        transaction.valid = () => !this.validateSnapshotTarget(filePath);
+        if (previousState) {
+            const payload = new TextEncoder().encode(JSON.stringify(previousState));
+            transaction.keepRecovery = { payload, digest: createHash('sha256').update(payload).digest('hex'), prepared: false };
+        }
+        const branchTolerant = this.captureKeepGitContext(filePath).crossBranch || !!this.getGitPauseReason(filePath);
+        transaction.valid = () => !this.validateKeepTarget(filePath, signature, true) &&
+            (!branchTolerant || this.keepReviewStillCurrent(review, signature, true));
         // Remove only this path's obsolete recovery items, retaining other batch members.
         this.revertHistory = history.map(record => ({ ...record, items: record.items.filter(item => item.filePath !== filePath) }))
             .filter(record => record.items.length > 0);
@@ -11094,11 +11284,69 @@ export class DiffTracker {
         return transaction;
     }
 
+    private async prepareKeepPersistence(transaction: BaselineTransaction): Promise<boolean> {
+        const recovery = transaction.keepRecovery;
+        if (!recovery) { return true; }
+        const backupUri = this.getPersistedStateUri(this.preKeepFileName);
+        const intentUri = this.getPersistedStateUri(this.keepIntentFileName);
+        if (!backupUri || !intentUri || backupUri.scheme !== 'file' || intentUri.scheme !== 'file') { return false; }
+        const current = () => this.baselineTransaction === transaction && this.isCurrentEpoch(transaction.epoch) &&
+            (transaction.valid?.() ?? true);
+        try {
+            // Never overwrite an unresolved rollback record from an earlier action.
+            if ((await this.readKeepIntent()).kind !== 'absent') {
+                this.recoveryBlocked = true;
+                this.persistenceIssue = 'An earlier text Keep requires recovery; reload before further review.';
+                return false;
+            }
+            if (!current() || recovery.payload.byteLength > this.maxPersistedBytes) { return false; }
+            await vscode.workspace.fs.createDirectory(this.storageUri!);
+            if (!current()) { return false; }
+            await vscode.workspace.fs.writeFile(backupUri, recovery.payload);
+            if (!current()) { return false; }
+            const backup = await this.readPersistedCandidate(backupUri, true);
+            if (!current() || backup.kind !== 'valid' || backup.digest !== recovery.digest) { return false; }
+            recovery.prepared = true;
+            await vscode.workspace.fs.writeFile(intentUri, new TextEncoder().encode(JSON.stringify({ version: 1, backupSha256: recovery.digest })));
+            return current();
+        } catch (error) {
+            this.reportPersistenceIssue('Cannot preserve the pre-Keep session; the reviewed before-images were not accepted.', error);
+            return false;
+        }
+    }
+
+    private commitPreparedKeepPersistence(transaction: BaselineTransaction): boolean {
+        if (!transaction.keepRecovery?.prepared || this.baselineTransaction !== transaction ||
+            !this.isCurrentEpoch(transaction.epoch) || !(transaction.valid?.() ?? true)) { return false; }
+        const failureUri = this.getPersistedStateUri(this.persistenceFailureFileName);
+        const intentUri = this.getPersistedStateUri(this.keepIntentFileName);
+        if (!failureUri || !intentUri || failureUri.scheme !== 'file' || intentUri.scheme !== 'file') { return false; }
+        try {
+            // The rollback intent survives publication and unsaved-marker removal.
+            // No promise/event-loop boundary separates the final authoritative
+            // Git/content check from the durable commit point (intent deletion).
+            try { fs.unlinkSync(failureUri.fsPath); }
+            catch (error) { if (!this.isFileNotFound(error)) { throw error; } }
+            if (!(transaction.valid?.() ?? true)) { return false; }
+            fs.unlinkSync(intentUri.fsPath);
+            transaction.durablyCommitted = true;
+            this.cleanupResolvedKeepBackup();
+            this.persistenceIssue = undefined;
+            this.persistenceFailed = false;
+            return true;
+        } catch (error) {
+            this.reportPersistenceIssue('Text Keep was not committed; its rollback intent was retained for recovery.', error);
+            return false;
+        }
+    }
+
     private async commitKeepTransaction(filePath: string, epoch: number, transaction: BaselineTransaction): Promise<boolean> {
         let committed = false;
         try {
-            committed = await this.completeBaseline(epoch, transaction) &&
-                this.baselineTransaction === transaction && this.isCurrentEpoch(epoch);
+            if (!await this.prepareKeepPersistence(transaction)) { return false; }
+            const completed = await this.completeBaseline(epoch, transaction);
+            committed = !!transaction.durablyCommitted || (completed &&
+                this.baselineTransaction === transaction && this.isCurrentEpoch(epoch));
             return committed;
         } catch (error) {
             if (this.isCurrentEpoch(epoch)) { this.reportPersistenceIssue('Keep transaction failed; prior baseline retained.', error); }
@@ -11108,12 +11356,24 @@ export class DiffTracker {
             this.endBaselineTransaction(transaction, committed);
             // A candidate may already have reached disk before target validation
             // failed. Publish the rolled-back baseline before returning failure.
-            if (!committed && invalidTarget) { await this.flushPendingPersistence(); }
-            if (!committed && this.isCurrentEpoch(epoch)) {
+            if (!committed && (invalidTarget || transaction.keepRecovery?.prepared)) {
+                const rolledBack = await this.flushPendingPersistence();
+                if (rolledBack && transaction.keepRecovery?.prepared && this.isCurrentEpoch(epoch)) {
+                    try {
+                        await this.deletePersistedFile(this.getPersistedStateUri(this.keepIntentFileName)!);
+                        this.cleanupResolvedKeepBackup();
+                    }
+                    catch (error) {
+                        this.recoveryBlocked = true;
+                        this.reportPersistenceIssue('Keep rollback was saved but its recovery intent could not be cleared; reload before further review.', error);
+                    }
+                }
+            }
+            if (!committed && this.isCurrentEpoch(epoch) && !this.keepHasUnverifiedEvidence(filePath)) {
                 // Also cover edits with no delivered callback. A dirty buffer
                 // remains unavailable, with its latest contents visible.
                 const state = await this.readCurrentFileState(filePath);
-                if (this.isCurrentEpoch(epoch)) {
+                if (this.isCurrentEpoch(epoch) && !this.keepHasUnverifiedEvidence(filePath)) {
                     const doc = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && this.canonicalTrackingPath(d.uri.fsPath) === filePath);
                     if (doc?.isDirty) { this.updateTrackedDiff(filePath, doc.getText(), { baselineChanged: true }); }
                     if (state.kind === 'unavailable') { this.markFileUnavailable(filePath, state.reason); }
@@ -11123,14 +11383,15 @@ export class DiffTracker {
         }
     }
 
-    private async keepBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken): Promise<ActionResult> {
-        const targetError = this.validateActionTarget(filePath);
+    private async keepBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken, signature: string): Promise<ActionResult> {
+        const targetError = this.validateKeepTarget(filePath, signature);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
+        if (!this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Keep refused because review, disk, or Git context became stale'); }
         if (this.trackedChanges.get(filePath)?.unavailableReason) {
             return this.actionResult(filePath, 'failed', 'File is unavailable; refresh before block actions');
         }
         const currentState = await this.readFileSnapshot(vscode.Uri.file(filePath));
-        if (!await this.verifyReview(review)) { return this.actionResult(filePath, 'conflict', 'Block review changed; review again'); }
+        if (!this.keepReviewStillCurrent(review, signature) || !await this.verifyReview(review) || !this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Block review changed; review again'); }
         if (currentState.kind !== 'text' || this.trackedChanges.get(filePath)?.isDeleted) {
             return this.actionResult(filePath, 'conflict', 'Missing or unavailable files require a file-level review');
         }
@@ -11210,21 +11471,23 @@ export class DiffTracker {
             },
             currentModel.dominantEol
         );
-        const finalTargetError = this.validateActionTarget(filePath);
+        const finalTargetError = this.validateKeepTarget(filePath, signature);
         if (finalTargetError) { return this.actionResult(filePath, 'conflict', finalTargetError); }
         const keepEpoch = this.sessionEpoch;
-        const transaction = this.beginKeepTransaction(filePath);
+        const transaction = this.beginKeepTransaction(filePath, review, signature);
         this.fileSnapshots.set(filePath, newSnapshot);
         this.baselineExistingFiles.add(filePath);
         if (!await this.commitKeepTransaction(filePath, keepEpoch, transaction)) {
-            return this.actionResult(filePath, 'failed', 'Keep could not be saved; review remains pending');
+            return this.actionResult(filePath, 'failed', 'Keep refused because review, disk, or Git context became stale, or persistence failed; review remains pending');
         }
 
         // Persistence awaits may admit newer editor/disk changes; never clear them
         // using the content reviewed before the write began.
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
+        if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         const afterKeep = await this.readCurrentFileState(filePath);
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
+        if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         if (afterKeep.kind === 'unavailable') { this.markFileUnavailable(filePath, afterKeep.reason); }
         else { this.updateTrackedDiff(filePath, afterKeep.kind === 'text' ? afterKeep.content : '', { baselineChanged: true, currentExists: afterKeep.kind === 'text' }); }
         return this.actionResult(filePath, 'success');
@@ -11236,18 +11499,22 @@ export class DiffTracker {
      */
     public keepAllChangesInFile(filePath: string, token = this.getReviewToken(filePath)): Promise<ActionResult> {
         filePath = this.canonicalTrackingPath(filePath);
-        return this.queueRecoveryAction(() => this.queueFileAction(filePath, token, review => this.keepFileReviewed(filePath, review)));
+        const context = this.captureKeepGitContext(filePath);
+        const signature = token?.keepGitContextSignature ?? context.signature;
+        return this.queueRecoveryAction(() => this.queueFileAction(filePath, token,
+            review => this.keepFileReviewed(filePath, review, signature)));
     }
 
-    private async keepFileReviewed(filePath: string, review: ReviewToken): Promise<ActionResult> {
-        const targetError = this.validateActionTarget(filePath);
+    private async keepFileReviewed(filePath: string, review: ReviewToken, signature: string): Promise<ActionResult> {
+        const targetError = this.validateKeepTarget(filePath, signature);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
+        if (!this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Keep refused because review, disk, or Git context became stale'); }
         const tracked = this.trackedChanges.get(filePath);
         if (!tracked || !this.fileSnapshots.has(filePath)) {
             return this.actionResult(filePath, 'conflict', 'No known baseline is available');
         }
         const state = await this.readCurrentFileState(filePath);
-        if (!this.matchesReview(review)) { return this.actionResult(filePath, 'conflict', 'Review changed during Keep'); }
+        if (!this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Review changed during Keep'); }
         if (state.kind === 'unavailable') {
             this.markFileUnavailable(filePath, state.reason);
             return this.actionResult(filePath, 'conflict', state.reason);
@@ -11257,10 +11524,10 @@ export class DiffTracker {
             this.updateTrackedDiff(filePath, currentContent, { currentExists: state.kind === 'text' });
             return this.actionResult(filePath, 'conflict', 'File changed since review; review again');
         }
-        const finalTargetError = this.validateActionTarget(filePath);
+        const finalTargetError = this.validateKeepTarget(filePath, signature);
         if (finalTargetError) { return this.actionResult(filePath, 'conflict', finalTargetError); }
         const keepEpoch = this.sessionEpoch;
-        const transaction = this.beginKeepTransaction(filePath);
+        const transaction = this.beginKeepTransaction(filePath, review, signature);
         this.fileSnapshots.set(filePath, currentContent);
         if (state.kind === 'missing') {
             this.baselineExistingFiles.delete(filePath);
@@ -11268,12 +11535,14 @@ export class DiffTracker {
             this.baselineExistingFiles.add(filePath);
         }
         if (!await this.commitKeepTransaction(filePath, keepEpoch, transaction)) {
-            return this.actionResult(filePath, 'failed', 'Keep could not be saved; review remains pending');
+            return this.actionResult(filePath, 'failed', 'Keep refused because review, disk, or Git context became stale, or persistence failed; review remains pending');
         }
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
         this.pendingWriteFiles.delete(filePath);
+        if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         const afterKeep = await this.readCurrentFileState(filePath);
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
+        if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         if (afterKeep.kind === 'unavailable') { this.markFileUnavailable(filePath, afterKeep.reason); }
         else { this.updateTrackedDiff(filePath, afterKeep.kind === 'text' ? afterKeep.content : '', { baselineChanged: true, currentExists: afterKeep.kind === 'text' }); }
         return this.actionResult(filePath, 'success');
