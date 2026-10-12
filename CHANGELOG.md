@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4
+
+- Allow selected text Keep across stable named branches in the same verified repository and worktree, including file, whole-block, folder and batch actions. Keep updates only the selected DiffTracker review baselines; it does not write workspace files, change Git state or clear the recorded Git pause.
+- Preserve strict Revert/Undo guards and the existing Acknowledge/Unknown reset policy. Git/content changes during Keep are rejected or rolled back, with interruption recovery for durable baseline updates.
+- Document conservative Keep limits: reftable repositories, manually replaced Git/worktree metadata, branches without an initial commit, and restored Git-backed sessions without a working Git monitor.
+- Simplify the user READMEs and keep maintainer release procedures separate.
+
 ## 0.8.3
 
 - Add the missing right-click alternatives for coverage-subtree exclusion, text Accept/Revert, read-only Acknowledge, and Unknown Reset Baseline. Retain the existing inline icons, row-category restrictions and shared safety-checked handlers.
