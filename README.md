@@ -133,6 +133,13 @@ This applies to file, block, folder and batch text Keep. Batch confirmation show
 
 Ordinary commits on the same named branch do not invalidate the review context.
 
+Keep has these additional limits:
+
+- Repositories using Git's **reftable** ref storage are not supported by the current verifier; Keep is refused when the Git state cannot be verified.
+- Manually replacing or repointing `.git` or linked-worktree metadata at the same path is not treated as a normal branch switch. Use **Archive and Rebuild Paused Git Baseline** once the repository is stable before continuing.
+- A Git repository must have an initial commit before Keep is available, including ordinary same-branch Keep. Creating that commit is a separate user action; DiffTracker does not create it.
+- When a restored session contains recorded Git provenance, Keep is refused if the VS Code Git monitor is unavailable (for example, the Git extension is disabled, missing or fails to start). Restore Git monitoring before retrying; switching to non-Git behavior does not bypass that saved provenance.
+
 Use **Code Diff Tracker: Restore Archived Git Review** from the Command Palette to restore the latest review saved by Archive and Rebuild. Preview the repository, branch/HEAD, workspace root and saved baseline evidence, then confirm replacement of the current DiffTracker review state. Return to the archived branch yourself before restoring; the command never switches branches or changes Git history or workspace files.
 
 Restoration supports one workspace root and one repository, with matching root identities and monitoring scope. A missing/incompatible archive, unverified Git state, merge/rebase, dirty editor or pending scope/recovery operation blocks restoration. A sticky pause from returning to the archived branch can be cleared only after the archived context is validated. Current disk content is reconciled against the archived before-images; unknown before-images stay unknown.
