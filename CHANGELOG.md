@@ -5,6 +5,7 @@
 - Allow selected text Keep across stable named branches in the same verified repository and worktree, including file, whole-block, folder and batch actions. Keep updates only the selected DiffTracker review baselines; it does not write workspace files, change Git state or clear the recorded Git pause.
 - Preserve strict Revert/Undo guards and the existing Acknowledge/Unknown reset policy. Git/content changes during Keep are rejected or rolled back, with interruption recovery for durable baseline updates.
 - Document conservative Keep limits: reftable repositories, manually replaced Git/worktree metadata, branches without an initial commit, and restored Git-backed sessions without a working Git monitor.
+- Hide obsolete missing-target supplemental watcher warnings only after the owning subtree is explicitly excluded by committed monitoring scope. Preserve saved uncertainty for re-inclusion, pending or failed Apply warnings, and unrelated review evidence.
 - Simplify the user READMEs and keep maintainer release procedures separate.
 
 ## 0.8.3
