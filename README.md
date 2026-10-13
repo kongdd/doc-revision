@@ -1,3 +1,5 @@
+![Code Diff Tracker](./resources/readme-header.svg)
+
 # Code Diff Tracker
 
 Code Diff Tracker is a VS Code extension that records local workspace file changes. Supported text can be reviewed and safely kept or reverted; non-text resources have file-level visibility and, when their identity can be verified, an Acknowledge action. Review views include:

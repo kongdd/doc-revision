@@ -1,3 +1,5 @@
+![Code Diff Tracker](./resources/readme-header.svg)
+
 # Code Diff Tracker
 
 Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件变化。受支持文本可查看 Diff，并按块、文件或批量 Keep/Revert；非文本文件提供文件级可见性，身份可核验时可执行 Acknowledge。
