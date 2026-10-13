@@ -1,6 +1,6 @@
 import { displayFileName } from './utils/displayPath';
 import * as vscode from 'vscode';
-import { ActionResult, BatchActionResult, DiffTracker, MixedBatchActionResult, OpaqueReviewToken, ReviewToken, UnknownReviewToken, TrackChangesEvent } from './diffTracker';
+import { ActionResult, BatchActionResult, DiffTracker, LargeFileReminderToken, MixedBatchActionResult, OpaqueReviewToken, ReviewToken, UnknownReviewToken, TrackChangesEvent } from './diffTracker';
 import { DecorationManager } from './decorationManager';
 import { DiffTreeDataProvider } from './diffTreeView';
 import { DiffHoverProvider } from './hoverProvider';
@@ -707,14 +707,6 @@ export async function activate(context: vscode.ExtensionContext) {
             const captured = token ?? (typeof filePathOrItem === 'string'
                 ? diffTracker.getReviewToken(filePath) : filePathOrItem.reviewToken);
             if (!captured) { return missingReview(filePath); }
-            const answer = await vscode.window.showWarningMessage(
-                `Accept the current text changes in ${displayFileName(filePath)} as the new baseline?`,
-                { modal: true, detail: 'This does not change workspace files. It discards this file’s previous comparison baseline.' },
-                'Accept Changes'
-            );
-            if (answer !== 'Accept Changes') {
-                return { filePath, status: 'cancelled', reason: 'Accept cancelled' } satisfies ActionResult;
-            }
             return reportAction(await diffTracker.keepAllChangesInFile(filePath, captured));
         })
     );
@@ -817,20 +809,21 @@ export async function activate(context: vscode.ExtensionContext) {
                 ? diffTracker.getOpaqueReviewToken(filePath)
                 : filePathOrItem?.opaqueReviewToken);
             if (!token) { return missingReview(filePath); }
-            const answer = await vscode.window.showWarningMessage(
-                `Acknowledge the read-only change for ${displayFileName(filePath)}?`,
-                { modal: true, detail: 'This advances only the saved identity baseline. It does not write, delete, restore, or copy the file contents, and it creates no Undo record.' },
-                'Acknowledge',
-                'Cancel'
-            );
-            if (answer !== 'Acknowledge') {
-                return { filePath, status: 'cancelled', reason: 'Acknowledge cancelled' } satisfies ActionResult;
-            }
-            const result = reportAction(await diffTracker.acknowledgeOpaqueChange(filePath, token));
-            if (result.status === 'success') {
-                void vscode.window.showInformationMessage('Code Diff Tracker: Read-only change acknowledged.');
-            }
-            return result;
+            return reportAction(await diffTracker.acknowledgeOpaqueChange(filePath, token, { allowCrossBranch: true }));
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffTracker.acknowledgeLargeFileReminder', async (
+            filePathOrItem: string | { filePath?: string; largeFileReminderToken?: LargeFileReminderToken },
+            reminderToken?: LargeFileReminderToken
+        ) => {
+            const filePath = extractFilePath(filePathOrItem);
+            if (!filePath) { return; }
+            const token = reminderToken ?? (typeof filePathOrItem === 'string'
+                ? diffTracker.getLargeFileReminderToken(filePath) : filePathOrItem?.largeFileReminderToken);
+            if (!token) { return missingReview(filePath); }
+            return reportAction(await diffTracker.acknowledgeLargeFileReminder(filePath, token));
         })
     );
 

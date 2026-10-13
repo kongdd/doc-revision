@@ -105,6 +105,15 @@ When recording starts, Code Diff Tracker:
 5. Keeps the tree, decorations, CodeLens, and WebView synchronized.
 6. Verifies review version, file state, persistence state, and Git context before mutating reviewed files.
 
+## Storage and Cleanup
+
+- Review state lives in VS Code's workspace-scoped extension storage on the extension host. In Remote-WSL, that host is in WSL. Supported text baselines store full original content, including unchanged files in the captured scope; opaque files store identity metadata, not binary copies. This is not an unlimited copy of every edit. Undo retains up to 10 operations, each potentially covering several files.
+- The 50 MiB limit applies to one serialized session, **not the whole storage directory**. The primary state and last-good copy can use roughly twice that session's size; a temporary write can add another copy. The latest archive and recovery backups can add more.
+- To reduce future baseline size, exclude unneeded build output, dependencies or logs through **Manage Monitoring Scope**, then review and explicitly apply the proposed scope. Exclusion is not a guarantee that all historical or recovery copies are deleted.
+- When the current review is no longer needed, stop recording, then run **Clear Diffs** and confirm to clear its saved baseline, pending review and Undo. This loses review evidence but does not change workspace files; it does not guarantee removal of every backup or secure erasure. While recording, Clear Diffs instead captures a new baseline and may not reduce storage. **Archive and Rebuild** keeps the latest previous archive, so it is not a space-cleanup shortcut.
+
+Do not delete individual session JSON files, recovery intents or failure markers to free space or bypass a recovery warning. Preserve the workspace and extension storage before troubleshooting an interrupted save.
+
 ## Safety and Recovery Behavior
 
 ### Optional Native Review
@@ -125,11 +134,19 @@ Baseline growth and Keep operations must be persisted before review actions resu
 
 ### Git context changes
 
-Fresh recording waits for the VS Code Git API to become ready before establishing the Git baseline. If a repository later changes branch, detached HEAD, worktree identity, or enters an unstable merge/rebase state, existing review data is preserved, while Revert and Undo actions for that repository pause. Use **Archive and Rebuild Paused Git Baseline** only after the repository reaches a stable state.
+Fresh recording waits for the VS Code Git API to become ready before establishing the Git baseline. If a repository later changes branch, detached HEAD, worktree identity, or enters an unstable merge/rebase state, existing review data is preserved, while Revert and Undo actions for that repository pause. Returning to a compatible Git context automatically revalidates the live repository before resuming future review actions. Existing before-images, pending reviews and Undo records are retained; an in-flight action that observed the incompatible context is not revived. **Archive and Rebuild Paused Git Baseline** explicitly starts a new baseline, rather than unlocking the existing review.
 
 After switching between stable named branches in the same verified repository and worktree, text **Keep** can still update the selected review baselines. Both branches must have commits, and the review version, current content, unsaved-editor state, monitoring scope and saved-session checks must pass. Keep does not modify workspace files, the Git index or HEAD. It does not change the Git context originally recorded with the session or clear its pause.
 
-This applies to file, block, folder and batch text Keep. Batch confirmation shows the number of eligible text files; mixed batches do not relax the restrictions on non-text **Acknowledge** or unknown-baseline reset. If the Git context or reviewed content changes while Keep is pending, the operation is refused or rolled back. If saving is interrupted, reload to recover the saved review before starting a new baseline. **Revert**, **Undo**, non-text **Acknowledge** and unknown-baseline reset retain their existing Git-context restrictions.
+This applies to file, block, folder and batch text Keep. Batch confirmation shows the number of eligible text files; mixed batches do not relax the restrictions on non-text **Acknowledge** or unknown-baseline reset. If the Git context or reviewed content changes while Keep is pending, the operation is refused or rolled back. If saving is interrupted, reload to recover the saved review before starting a new baseline. **Revert**, **Undo**, folder/batch non-text **Acknowledge** and unknown-baseline reset retain their strict Git-context restrictions.
+
+The single-file **Acknowledge Read-only Change** action can accept a verified current identity across stable named branches under the same Git checks as text Keep. It advances only that file’s baseline, leaves other reviews and the repository pause unchanged, and removes only that file’s obsolete Undo entries. It does not save binary before-images or provide binary Revert. Different file content after returning to the original branch becomes pending again. Ordinary single-file Accept/Acknowledge runs directly; conflicts remain visible without accepting a newer version automatically.
+
+Acknowledge and explicit Unknown Reset preserve a complete pre-action session before publication. Interrupted saves recover the prior review rather than relying on an in-memory rollback; unchanged watcher notifications do not invalidate an approved file identity.
+
+Files larger than **64 MiB** use reminders only: the extension does not read their full contents or compute content fingerprints. Reminders compare path, existence and size; same-size content edits and timestamp-only changes are intentionally ignored. Files already present when the baseline is established do not produce an initial reminder. Later additions, size changes and deletions do; renames can appear as deletion of the old path and addition of the new path.
+
+Acknowledging a large-file reminder marks that observed path/size state as seen. It does not verify or accept file contents, replace an earlier text baseline, remove earlier Undo evidence, or provide binary Revert. An earlier review remains preserved when a small file grows beyond the limit. If the file becomes small again, normal review resumes against any preserved before-image; missing original content remains Unknown. Use your own Git or software backups for recovery; the extension does not check that those backups exist.
 
 Ordinary commits on the same named branch do not invalidate the review context.
 
@@ -142,7 +159,7 @@ Keep has these additional limits:
 
 Use **Code Diff Tracker: Restore Archived Git Review** from the Command Palette to restore the latest review saved by Archive and Rebuild. Preview the repository, branch/HEAD, workspace root and saved baseline evidence, then confirm replacement of the current DiffTracker review state. Return to the archived branch yourself before restoring; the command never switches branches or changes Git history or workspace files.
 
-Restoration supports one workspace root and one repository, with matching root identities and monitoring scope. A missing/incompatible archive, unverified Git state, merge/rebase, dirty editor or pending scope/recovery operation blocks restoration. A sticky pause from returning to the archived branch can be cleared only after the archived context is validated. Current disk content is reconciled against the archived before-images; unknown before-images stay unknown.
+Restoration supports one workspace root and one repository, with matching root identities and monitoring scope. A missing/incompatible archive, unverified Git state, merge/rebase, dirty editor or pending scope/recovery operation blocks restoration. Any remaining Git pause is cleared only after the archived context is validated. Current disk content is reconciled against the archived before-images; unknown before-images stay unknown.
 
 Restoration preserves the archive's recording state. Active archives resume tracking; stopped archives receive one bounded reconciliation, including later-added files, and remain stopped. Temporary watchers verify the restore transaction and are released for a stopped session. A stopped current session can still restore an active archive. **Start Recording** creates a fresh baseline from current files; it does not resume an archived baseline.
 
