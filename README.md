@@ -1,4 +1,24 @@
-![Code Diff Tracker](./resources/readme-header.png)
+<p align="center">
+  <img src="./resources/readme-header.png" alt="Code Diff Tracker" width="1200" />
+</p>
+
+<p align="center">
+  <strong>Review local changes before moving on.</strong><br />
+  Keep or revert text changes in VS Code, with pending reviews preserved across restarts.
+</p>
+
+<p align="center">
+  <a href="https://github.com/lengmh/DiffTracker/releases"><img src="https://img.shields.io/github/v/release/lengmh/DiffTracker?style=flat-square" alt="Release" /></a>
+  <a href="https://github.com/lengmh/DiffTracker/stargazers"><img src="https://img.shields.io/github/stars/lengmh/DiffTracker?style=flat-square" alt="Stars" /></a>
+  <a href="https://github.com/lengmh/DiffTracker/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lengmh/DiffTracker?style=flat-square" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="#usage">Quick Start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="https://github.com/lengmh/DiffTracker/blob/main/docs/development.md">Docs</a> ·
+  <a href="https://github.com/lengmh/DiffTracker/releases">Releases</a>
+</p>
 
 # Code Diff Tracker
 
