@@ -1,4 +1,4 @@
-![Code Diff Tracker](./resources/readme-header.svg)
+![Code Diff Tracker](./resources/readme-header.png)
 
 # Code Diff Tracker
 
