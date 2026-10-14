@@ -184,10 +184,11 @@ DOM/renderer stub, not a real browser or VS Code renderer.
 Development identity: `lengmh.diff-tracker`, version `0.6.1`, display name
 `Diff Tracker (Development)`, VSIX pre-release metadata. This is not an upstream
 TinyTigerPan release and is not published to the Marketplace. Package using the
-existing build chain:
+existing build chain (repository-relative output example; the original build used
+a temporary directory):
 
 ```sh
-npm run package -- --pre-release --out /workspace/scratch/e83d5d44bd35/diff-tracker-0.6.1-development.vsix
+npm run package -- --pre-release --out ./diff-tracker-0.6.1-development.vsix
 ```
 
 Install/rollback: disable `TinyTigerPan.diff-tracker`, install the development VSIX
@@ -197,4 +198,4 @@ one. No upstream-session migration is performed. To roll back, disable/remove
 `lengmh.diff-tracker`, re-enable upstream and reload; edits/review decisions are not
 undone or transferred by this switch. Preserve upstream storage and pending work.
 
-Package command completed with exit **0**. VSIX manifest confirms fork publisher/version and pre-release property; packaged tracker JavaScript matches the compiled production file. Package size: **6951784 bytes**; SHA-256: `80ba3d317c015acf4bd357b4162b203c1504eeffd4915d3581a4baa982fb2900`. The package was built before this packaging-result paragraph was appended; production source and manifest are identical. No runtime installation was performed.
+The original package command completed with exit **0**. The output path above has been generalized for this documentation; the command was not rerun for this path-only edit. VSIX manifest confirms fork publisher/version and pre-release property; packaged tracker JavaScript matches the compiled production file. Package size: **6951784 bytes**; SHA-256: `80ba3d317c015acf4bd357b4162b203c1504eeffd4915d3581a4baa982fb2900`. The package was built before this packaging-result paragraph was appended; production source and manifest are identical. No runtime installation was performed.
