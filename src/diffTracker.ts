@@ -1082,7 +1082,9 @@ export class DiffTracker {
         const watcherCoverageNeedsS4 = restoreSupplementalPlan?.issue;
         const incomplete = state.baselineState === 'building' || !rootsMatch || !scopeRootsMatch ||
             configuredScopeNeedsReconciliation || !!watcherCoverageNeedsS4;
-        this.isRecording = incomplete ? false : state.isRecording;
+        // Older versions could persist an active session with no folders.
+        // Restoration bypasses Start, so enforce the same idle boundary here.
+        this.isRecording = !incomplete && currentRoots.length > 0 && state.isRecording;
         // An explicit archive restore promises a current-filesystem review even
         // when the saved session was stopped. Observe just this transaction;
         // never change its recording intent or emit a recording-start event.
@@ -1416,6 +1418,7 @@ export class DiffTracker {
     }
 
     public startRecording(): boolean {
+        if (this.getWorkspaceRoots().length === 0) { return false; }
         if (this.disposed || this.recoveryBlocked || this.archiveRestoreTask ||
             (this.baselineTransaction?.baselineRecovery?.prepared && !this.baselineTransaction.durablyCommitted)) { return false; }
         const identityIssue = this.getPathIdentityIssue();
@@ -9619,6 +9622,11 @@ export class DiffTracker {
         return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
     }
 
+    private repositoryOverlapsWorkspace(repoRoot: string): boolean {
+        return this.getWorkspaceRoots().some(workspaceRoot =>
+            this.pathBelongsToRoot(workspaceRoot, repoRoot) || this.pathBelongsToRoot(repoRoot, workspaceRoot));
+    }
+
     public setGitContextPending(pending: boolean): void {
         if (this.disposed || this.gitContextPending === pending) { return; }
         this.gitContextPending = pending;
@@ -9640,6 +9648,7 @@ export class DiffTracker {
     }
 
     public setBaselineGitContexts(contexts: GitContextSnapshot[]): void {
+        contexts = contexts.filter(context => this.repositoryOverlapsWorkspace(context.repoRoot));
         this.latestGitContexts = new Map(contexts.map(context => [context.repoRoot, { ...context }]));
         this.baselineGitContexts.clear();
         this.pausedGitRepositories.clear();
@@ -9669,6 +9678,9 @@ export class DiffTracker {
     }
 
     public observeGitContext(context: GitContextSnapshot): string | undefined {
+        // VS Code can expose repositories for loose files outside the workspace,
+        // including in a folderless window. They have no baseline to rebuild.
+        if (!this.repositoryOverlapsWorkspace(context.repoRoot)) { return undefined; }
         const previous = this.latestGitContexts.get(context.repoRoot);
         const tokenContextChanged = JSON.stringify(previous) !== JSON.stringify(context);
         this.latestGitContexts.set(context.repoRoot, { ...context });
@@ -9718,6 +9730,7 @@ export class DiffTracker {
     }
 
     public observeGitRepositoryRemoved(repoRoot: string): string | undefined {
+        if (!this.repositoryOverlapsWorkspace(repoRoot)) { return undefined; }
         this.latestGitContexts.set(repoRoot, undefined);
         if (!this.baselineGitContexts.has(repoRoot)) { return undefined; }
         const existing = this.pausedGitRepositories.get(repoRoot);
@@ -10181,9 +10194,7 @@ export class DiffTracker {
             context.repoRoot !== repoRoot || context.inProgress || !path.isAbsolute(repoRoot)) {
             return false;
         }
-        const overlapsWorkspace = this.getWorkspaceRoots().some(workspaceRoot =>
-            this.pathBelongsToRoot(workspaceRoot, repoRoot) || this.pathBelongsToRoot(repoRoot, workspaceRoot));
-        if (!overlapsWorkspace) { return false; }
+        if (!this.repositoryOverlapsWorkspace(repoRoot)) { return false; }
         if (vscode.workspace.textDocuments.some(document =>
             document.uri.scheme === 'file' && ownsPath(document.uri.fsPath) && document.isDirty)) {
             return false;
