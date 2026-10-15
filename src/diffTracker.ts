@@ -258,6 +258,8 @@ interface BaselineTransaction {
     // Authoritative identity check only at the synchronous durable commit barrier.
     commitValid?: () => boolean;
     observedEvents?: Map<string, StartupEvent>;
+    deferReady?: boolean;
+    readyPrepared?: boolean;
     baselineRecovery?: { payload: Uint8Array; digest: string; prepared: boolean };
     durablyCommitted?: boolean;
     rollback: () => void;
@@ -1514,6 +1516,7 @@ export class DiffTracker {
                             'Imported observation changed during baseline preparation; rebuild after activity settles.', false);
                     }
                 });
+                transaction.deferReady = true;
                 let completed = false;
                 try {
                     let supplemental: SupplementalCoverageInstall | undefined;
@@ -1526,13 +1529,16 @@ export class DiffTracker {
                     }
                     transaction.valid = this.freshBaselineCoverageGuard(retiredImports, supplemental, epoch);
                     await this.initializeWorkspaceSnapshots(transaction);
-                    if (!this.isCurrentEpoch(epoch) || this.baselineTransaction !== transaction ||
-                        this.baselineBuilding || !transaction.valid()) { return; }
+                    if (!transaction.readyPrepared || !this.isCurrentEpoch(epoch) || this.baselineTransaction !== transaction ||
+                        !transaction.valid()) { return; }
                     if (supplemental) {
                         this.reconcileSupplementalCoverageAfterSuccessfulScan(supplemental);
                         if (!await this.flushPersistState(true, transaction) || !transaction.valid()) { return; }
                     }
                     completed = true;
+                    this.endBaselineTransaction(transaction, true);
+                    this.baselineBuilding = false;
+                    this._onDidChangeBaselineState.fire('ready');
                 } finally {
                     this.endBaselineTransaction(transaction, completed);
                     if (this.isCurrentEpoch(epoch)) { this.schedulePersistState(); }
@@ -1850,6 +1856,7 @@ export class DiffTracker {
 
         transaction = this.beginBaselineTransaction(restoreMemory);
         transaction.observedEvents = new Map();
+        transaction.deferReady = true;
         transaction.valid = () => this.isRecording && !this.recoveryBlocked &&
             !this.workspaceContextChanged && !this.gitContextPending;
 
@@ -1893,8 +1900,8 @@ export class DiffTracker {
             const contextCurrent = transaction.valid!;
             transaction.valid = () => contextCurrent() && coverageCurrent();
             await this.initializeWorkspaceSnapshots(transaction);
-            const committed = this.isCurrentEpoch(epoch) && this.baselineTransaction === transaction &&
-                this.snapshotInitialized && !this.baselineBuilding && (!transaction.valid || transaction.valid());
+            const committed = transaction.readyPrepared && this.isCurrentEpoch(epoch) && this.baselineTransaction === transaction &&
+                this.snapshotInitialized && (!transaction.valid || transaction.valid());
             if (!committed) {
                 await rollback();
                 return false;
@@ -1908,6 +1915,9 @@ export class DiffTracker {
                 this.commitSupplementalCoverageTargets(supplemental.desiredRoots);
             }
             this.endBaselineTransaction(transaction, true);
+            this.baselineBuilding = false;
+            this._onDidChangeBaselineState.fire('ready');
+            if (!this.isCurrentEpoch(epoch)) { return true; }
             this.emitTrackChangesEvent({
                 removedFiles: previousReviewPaths,
                 fullRefresh: true,
@@ -7893,6 +7903,7 @@ export class DiffTracker {
         observeStopped = false
     ): Promise<boolean> {
         ++this.baselineCompletionVersion;
+        if (transaction?.deferReady) { transaction.readyPrepared = false; }
         this.baselineBuilding = true;
         this.snapshotInitialized = true;
         await this.processPendingExternalChanges(observeStopped);
@@ -7922,8 +7933,14 @@ export class DiffTracker {
             if (!this.commitPreparedBaselineAcceptancePersistence(transaction)) { return false; }
         } else if (transaction?.commitValid &&
             (!transaction.commitValid() || (transaction.valid && !transaction.valid()))) { return false; }
-        this.baselineBuilding = false;
-        this._onDidChangeBaselineState.fire('ready');
+        // Start/Reset still have coverage reconciliation and its save barrier
+        // to finish. Their caller publishes Ready only after ending the owning
+        // transaction, so Ready listeners can immediately perform normal work.
+        if (transaction?.deferReady) { transaction.readyPrepared = true; }
+        else {
+            this.baselineBuilding = false;
+            this._onDidChangeBaselineState.fire('ready');
+        }
         return true;
     }
 

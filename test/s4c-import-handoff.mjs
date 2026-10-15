@@ -1050,6 +1050,40 @@ export function registerS4CImportHandoff(h, fixture) {
         } finally { release(); tracker.refreshIgnoreMatchers = refresh; }
     }));
 
+    for (const transition of ['Start', 'Reset']) {
+        test(`Issue #45 ${transition} Ready publishes only after transaction release and permits immediate scope Apply`, () => fixture(async ({tracker,dir,scope}) => {
+            const imported = path.join(dir, `ready-barrier-${transition}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'baseline at Ready');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            if (transition === 'Start') { tracker.stopRecording(); }
+            let observed = false, transactionAtReady, applying;
+            let notifyReady;
+            const ready = new Promise(resolve => { notifyReady = resolve; });
+            const subscription = tracker.onDidChangeBaselineState(state => {
+                if (state !== 'ready' || observed) { return; }
+                observed = true;
+                // These observations happen synchronously in the Ready listener,
+                // without yielding or waiting for persistence to catch up.
+                transactionAtReady = tracker.baselineTransaction;
+                applying = tracker.applyConfiguredMonitoringScope(scope, false, () => true);
+                notifyReady();
+            });
+            try {
+                if (transition === 'Start') { assert.equal(tracker.startRecording(), true); }
+                else { assert.equal(await tracker.resetBaselineToCurrentState(), true); }
+                await ready;
+                const result = await applying;
+                // Allow the earlier operation to settle before fixture disposal;
+                // this cannot change the values captured by the Ready listener.
+                await waitUntil(() => tracker.baselineTransaction === undefined);
+                assert.deepEqual({transactionReleased: transactionAtReady === undefined, applyStatus: result.status},
+                    {transactionReleased:true, applyStatus:'applied'},
+                    `Ready must be an actionable completion boundary: ${JSON.stringify(result)}`);
+            } finally { subscription.dispose(); }
+        }));
+    }
+
     test('Issue #45 unchanged imported owners complete Start and observe later edits', () => fixture(async ({tracker,dir}) => {
         const imported = path.join(dir, 'start-stable-owner');
         const nested = path.join(imported, 'nested');
