@@ -1051,6 +1051,150 @@ export function registerS4CImportHandoff(h, fixture) {
     }));
 
     for (const transition of ['Start', 'Reset']) {
+        test(`Issue #45 failed ${transition} preflight cannot strand superseded Start in building`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `failed-takeover-${transition}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'known import');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            const initialize = tracker.initializeWorkspaceSnapshots.bind(tracker);
+            let entered, release, settled, calls = 0;
+            const waiting = new Promise(resolve => { entered = resolve; });
+            const gate = new Promise(resolve => { release = resolve; });
+            const finished = new Promise(resolve => { settled = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                if (++calls === 1) { entered(); await gate; }
+                return refresh(...args);
+            };
+            tracker.initializeWorkspaceSnapshots = async (...args) => {
+                try { return await initialize(...args); }
+                finally { settled(); }
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await waiting;
+                // This real unsupported watcher policy makes candidate planning
+                // fail before a replacement scan can take ownership.
+                h.setVsCodeExcludes({'files.watcherExclude': {'**/node_modules/*/**':true}});
+                const accepted = transition === 'Start' ? tracker.startRecording()
+                    : await tracker.resetBaselineToCurrentState();
+                assert.equal(accepted, false, 'the replacement preflight must actually refuse');
+                h.setVsCodeExcludes({});
+                release();
+                await finished;
+                await new Promise(resolve => setImmediate(resolve));
+                assert.notEqual(tracker.getBaselineState(), 'building',
+                    'a rejected takeover must resume the earlier scan or explicitly pause, never leave a dead Starting state');
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                if (tracker.getIsRecording()) {
+                    assert.equal(tracker.getBaselineState(), 'ready');
+                    assertCurrentCoverageOrGap(tracker, imported);
+                } else {
+                    assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false,
+                        'an explicitly paused failed takeover must not retain live native observers');
+                }
+            } finally {
+                release(); h.setVsCodeExcludes({});
+                tracker.refreshIgnoreMatchers = refresh;
+                tracker.initializeWorkspaceSnapshots = initialize;
+            }
+        }));
+    }
+
+    for (const failure of ['refresh-throw', 'retired-recreated', 'planning-throw']) {
+        test(`Issue #45 takeover ${failure} explicitly pauses an abandoned Start`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `takeover-failure-${failure}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'old.txt'), 'old imported bytes');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            if (failure === 'retired-recreated') { fs.rmSync(imported, {recursive:true}); }
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            const plan = tracker.configuredSupplementalCoveragePlan.bind(tracker);
+            let entered, release, calls = 0;
+            const waiting = new Promise(resolve => { entered = resolve; });
+            const gate = new Promise(resolve => { release = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                const call = ++calls;
+                if (call === 1) { entered(); await gate; }
+                if (call === 2 && failure === 'refresh-throw') { throw new Error('injected refresh failure'); }
+                const result = await refresh(...args);
+                if (call === 2 && failure === 'retired-recreated') { fs.mkdirSync(imported); }
+                return result;
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await waiting;
+                if (failure === 'planning-throw') {
+                    tracker.configuredSupplementalCoveragePlan = () => { throw new Error('injected planning failure'); };
+                    assert.throws(() => tracker.startRecording(), /injected planning failure/);
+                } else { assert.equal(await tracker.resetBaselineToCurrentState(), false); }
+                assert.equal(tracker.getIsRecording(), false);
+                assert.equal(tracker.getBaselineState(), 'idle');
+                assert.equal(tracker.snapshotInitialized, false);
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false);
+                release();
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(await tracker.flushPendingPersistence(), true);
+                const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+                assert.equal(saved.isRecording, false);
+                assert.equal(saved.baselineState, 'building', 'abandoned partial capture must not persist Ready');
+                assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
+            } finally {
+                release(); tracker.refreshIgnoreMatchers = refresh;
+                tracker.configuredSupplementalCoveragePlan = plan;
+            }
+        }));
+    }
+
+    for (const newer of ['Start', 'Stop']) {
+        test(`Issue #45 old Reset refresh failure cannot pause newer ${newer} epoch`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `takeover-newer-${newer}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'known imported baseline');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            let enterStart, releaseStart, enterReset, releaseReset, calls = 0;
+            const startWaiting = new Promise(resolve => { enterStart = resolve; });
+            const startGate = new Promise(resolve => { releaseStart = resolve; });
+            const resetWaiting = new Promise(resolve => { enterReset = resolve; });
+            const resetGate = new Promise(resolve => { releaseReset = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                const call = ++calls;
+                if (call === 1) { enterStart(); await startGate; }
+                if (call === 2) { enterReset(); await resetGate; throw new Error('late old Reset failure'); }
+                return refresh(...args);
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await startWaiting;
+                const resetting = tracker.resetBaselineToCurrentState();
+                await resetWaiting;
+                if (newer === 'Start') {
+                    assert.equal(tracker.startRecording(), true);
+                    await waitUntil(() => tracker.getBaselineState() === 'ready');
+                } else { tracker.stopRecording(); }
+                const epoch = tracker.sessionEpoch;
+                const initialized = tracker.snapshotInitialized;
+                releaseReset();
+                assert.equal(await resetting, false);
+                releaseStart();
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(tracker.sessionEpoch, epoch, 'old failure must not call Stop on the newer epoch');
+                assert.equal(tracker.getIsRecording(), newer === 'Start');
+                assert.equal(tracker.getBaselineState(), newer === 'Start' ? 'ready' : 'idle');
+                assert.equal(tracker.snapshotInitialized, initialized);
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                if (newer === 'Start') { assertCurrentCoverageOrGap(tracker, imported); }
+                else { assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false); }
+            } finally { releaseReset(); releaseStart(); tracker.refreshIgnoreMatchers = refresh; }
+        }));
+    }
+
+    for (const transition of ['Start', 'Reset']) {
         test(`Issue #45 ${transition} Ready publishes only after transaction release and permits immediate scope Apply`, () => fixture(async ({tracker,dir,scope}) => {
             const imported = path.join(dir, `ready-barrier-${transition}`);
             fs.mkdirSync(imported);

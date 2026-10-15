@@ -238,6 +238,11 @@ module.exports = async function s4cHandoffHost(workspace) {
         finally { tracker.refreshIgnoreMatchers = refresh; }
         assert.equal(recreated, true);
         assert.equal(tracker.importedCoverageObligations.has(root), true);
+        // Windows updates moved entries' timestamps and delivers rename events
+        // asynchronously. Retry after the production startup timestamp safety
+        // window, rather than treating its correct unknown-before-image refusal
+        // as lost native observation.
+        await delay(tracker.startupTimestampSafetyMarginMs + 250);
         assert.equal(await tracker.resetBaselineToCurrentState(), true);
         for (const directory of directories) {
             assert.equal(tracker.supplementalDirectoryWatchers.get(directory)?.epoch, tracker.sessionEpoch,
@@ -246,6 +251,7 @@ module.exports = async function s4cHandoffHost(workspace) {
                 'retry must retain an open native handle for each imported directory');
         }
         assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.deepEqual(tracker.getCoverageGaps(), [], 'retry must establish known file baselines');
         tracker.fileWatchers.forEach(watcher => watcher.dispose());
         tracker.fileWatchers = [];
         await delay(250);

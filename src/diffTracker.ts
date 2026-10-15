@@ -472,6 +472,22 @@ export class DiffTracker {
         this.baselineTransaction = undefined;
         transaction.finish();
     }
+    private cancelBaselineForReplacement(): () => void {
+        const transaction = this.baselineTransaction;
+        if (transaction) { this.endBaselineTransaction(transaction, false); }
+        const incomplete = this.baselineBuilding || !this.snapshotInitialized;
+        const epoch = this.sessionEpoch;
+        return () => {
+            // A rejected replacement cannot leave a cancelled scan displaying
+            // Building forever, nor pause a newer operation started meanwhile.
+            if (!transaction || !this.isCurrentEpoch(epoch) || this.baselineTransaction) { return; }
+            if (incomplete) {
+                this.snapshotInitialized = false;
+                this.scanCoverage = undefined;
+            }
+            this.stopRecording();
+        };
+    }
     private mayAdoptLegacyGitContexts = false;
     private gitContextPending = false;
 
@@ -1432,18 +1448,24 @@ export class DiffTracker {
         }
         // A repeated Start must plan from restored ownership evidence, not
         // from a previous candidate's tentatively retired obligation set.
-        if (this.baselineTransaction) { this.endBaselineTransaction(this.baselineTransaction, false); }
+        const rejectReplacement = this.cancelBaselineForReplacement();
         const previousImportedObligations = new Set(this.importedCoverageObligations);
         const retiredImports = this.absentImportedCoverageTargets();
         let startupSupplementalPlan: SupplementalCoveragePlan | undefined;
-        if (this.effectiveMonitoringScope.kind === 'configured') {
-            startupSupplementalPlan = this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true);
-            if (startupSupplementalPlan.issue) {
-                vscode.window.showWarningMessage(
-                    `Code Diff Tracker: Supplemental coverage cannot be established at ${startupSupplementalPlan.issue}. Narrow the scope before rebuilding.`
-                );
-                return false;
+        let preflightAccepted = false;
+        try {
+            if (this.effectiveMonitoringScope.kind === 'configured') {
+                startupSupplementalPlan = this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true);
+                if (startupSupplementalPlan.issue) {
+                    vscode.window.showWarningMessage(
+                        `Code Diff Tracker: Supplemental coverage cannot be established at ${startupSupplementalPlan.issue}. Narrow the scope before rebuilding.`
+                    );
+                    return false;
+                }
             }
+            preflightAccepted = true;
+        } finally {
+            if (!preflightAccepted) { rejectReplacement(); }
         }
         this.sessionWorkspaceRoots = this.getWorkspaceRoots();
         this.importedCoverageObligations = new Set(startupSupplementalPlan?.importedTargets ??
@@ -1607,31 +1629,38 @@ export class DiffTracker {
             (this.baselineTransaction?.baselineRecovery?.prepared && !this.baselineTransaction.durablyCommitted)) { return false; }
         // Reset may supersede an unfinished Start. Restore that candidate's
         // tentative retirement before deriving this replacement plan as well.
-        if (this.baselineTransaction) { this.endBaselineTransaction(this.baselineTransaction, false); }
+        const rejectReplacement = this.cancelBaselineForReplacement();
         const previousEpoch = this.sessionEpoch;
         const plannedImportedObligations = [...this.importedCoverageObligations];
         const retiredImports = this.absentImportedCoverageTargets();
-        const supplementalPlan = this.isRecording && this.effectiveMonitoringScope.kind === 'configured'
-            ? this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true) : undefined;
-        if (supplementalPlan?.issue) {
-            vscode.window.showWarningMessage(`Code Diff Tracker: Supplemental coverage cannot be rebuilt at ${supplementalPlan.issue}. Prior review is preserved.`);
-            return false;
-        }
+        let supplementalPlan: SupplementalCoveragePlan | undefined;
         let watchers: vscode.FileSystemWatcher[] | undefined;
-        if (this.isRecording) {
-            try {
-                await this.refreshIgnoreMatchers();
-                if (!this.isCurrentEpoch(previousEpoch)) { return false; }
-                if (!this.sameStringSet(plannedImportedObligations, [...this.importedCoverageObligations]) ||
-                    retiredImports.some(root => this.importedCoverageTargetExistsForNewBaseline(root))) {
-                    vscode.window.showWarningMessage('Code Diff Tracker: Imported coverage changed during baseline preparation. Prior review is preserved; retry after file activity settles.');
-                    return false;
-                }
-                watchers = this.createExternalWatchers(previousEpoch + 1);
-            } catch (error) {
-                this.reportExternalWatcherFailure(error);
+        let preflightAccepted = false;
+        try {
+            supplementalPlan = this.isRecording && this.effectiveMonitoringScope.kind === 'configured'
+                ? this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true) : undefined;
+            if (supplementalPlan?.issue) {
+                vscode.window.showWarningMessage(`Code Diff Tracker: Supplemental coverage cannot be rebuilt at ${supplementalPlan.issue}. Prior review is preserved.`);
                 return false;
             }
+            if (this.isRecording) {
+                try {
+                    await this.refreshIgnoreMatchers();
+                    if (!this.isCurrentEpoch(previousEpoch)) { return false; }
+                    if (!this.sameStringSet(plannedImportedObligations, [...this.importedCoverageObligations]) ||
+                        retiredImports.some(root => this.importedCoverageTargetExistsForNewBaseline(root))) {
+                        vscode.window.showWarningMessage('Code Diff Tracker: Imported coverage changed during baseline preparation. Prior review is preserved; retry after file activity settles.');
+                        return false;
+                    }
+                    watchers = this.createExternalWatchers(previousEpoch + 1);
+                } catch (error) {
+                    this.reportExternalWatcherFailure(error);
+                    return false;
+                }
+            }
+            preflightAccepted = true;
+        } finally {
+            if (!preflightAccepted) { rejectReplacement(); }
         }
         // Creation handlers carry stronger provenance than a generic path read:
         // they can establish known absence and recursively discover imported
