@@ -23,7 +23,11 @@ module.exports = async function s4cHandoffHost(workspace) {
     // Stage outside every workspace while retaining a genuine same-filesystem
     // move, avoiding exposure of staging to workspace-scoped observers.
     const source = fs.mkdtempSync(path.join(path.dirname(workspace), 's4c-import-source-'));
-    const root = vscode.Uri.file(path.join(workspace, 's4c-import-owner')).fsPath;
+    // Keep the configured include present while its imported child disappears.
+    // Otherwise Reset refuses the missing include before reaching the refresh race.
+    const includedParent = vscode.Uri.file(path.join(workspace, 's4c-import-owner')).fsPath;
+    fs.mkdirSync(includedParent);
+    const root = path.join(includedParent, 'imported');
     const nested = path.join(root, 'deep');
     const directories = [root, nested];
     const files = [path.join(root, 'readme.txt'), path.join(nested, 'tracked.txt')];
@@ -240,7 +244,7 @@ module.exports = async function s4cHandoffHost(workspace) {
     } finally {
         fs.watch = nativeWatch;
         await tracker.dispose();
-        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        await fs.promises.rm(includedParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         await fs.promises.rm(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         await fs.promises.rm(storage, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
