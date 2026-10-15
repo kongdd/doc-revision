@@ -217,6 +217,13 @@ module.exports = async function s4cHandoffHost(workspace) {
         // A retired-path decision must not survive an asynchronous refresh.
         // Use actual filesystem moves and native owners; do not synthesize a
         // directory notification to make the missing watcher appear covered.
+        // Windows prevents renaming a directory while native watch handles
+        // are open. Release OS handles only for the filesystem move; retain
+        // the imported obligation and require Reset to install real owners.
+        if (process.platform === 'win32') {
+            handles.filter(handle => !handle.closed).forEach(handle => handle.watcher.close());
+            await until('native handles to release the Windows move', () => handles.every(handle => handle.closed));
+        }
         fs.renameSync(root, source);
         const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
         let recreated = false;
