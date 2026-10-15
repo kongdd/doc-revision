@@ -170,8 +170,8 @@ module.exports = async function s4cHandoffHost(workspace) {
         assert.equal(new Map(stopped.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required');
 
-        // Issue #45: real Extension Host, non-Git imported directory, stopped
-        // Clear followed by process-level tracker restoration. The old restart
+        // Issue #45: real Extension Host, stopped Clear followed by
+        // same-process tracker disposal/restoration. The old restart
         // obligation is future Start work, not a live stopped-state warning.
         assert.equal(await tracker.resetBaselineToCurrentState(), true);
         assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
@@ -210,6 +210,31 @@ module.exports = async function s4cHandoffHost(workspace) {
         await until('native-only edit after Issue #45 restart', () =>
             tracker.getTrackedChanges().some(change =>
                 change.filePath === files[0] && change.currentContent === 'native edit after stopped Clear reload Start\n'));
+        // A retired-path decision must not survive an asynchronous refresh.
+        // Use actual filesystem moves and native owners; do not synthesize a
+        // directory notification to make the missing watcher appear covered.
+        fs.renameSync(root, source);
+        const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+        let recreated = false;
+        tracker.refreshIgnoreMatchers = async (...args) => {
+            await refresh(...args);
+            if (!recreated) {
+                recreated = true;
+                fs.renameSync(source, root);
+            }
+        };
+        try { assert.equal(await tracker.resetBaselineToCurrentState(), false); }
+        finally { tracker.refreshIgnoreMatchers = refresh; }
+        assert.equal(recreated, true);
+        assert.equal(tracker.importedCoverageObligations.has(root), true);
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        tracker.fileWatchers.forEach(watcher => watcher.dispose());
+        tracker.fileWatchers = [];
+        await delay(250);
+        fs.writeFileSync(files[1], 'native edit after rejected stale retirement and retry\n');
+        await until('native-only nested edit after stale retirement refusal', () =>
+            tracker.getTrackedChanges().some(change => change.filePath === files[1] &&
+                change.currentContent === 'native edit after rejected stale retirement and retry\n'));
         tracker.stopRecording();
         console.log('PASS HOST-S4-C imported handoff and Issue #45 stopped Clear → Reload → Start retain native observation');
     } finally {
