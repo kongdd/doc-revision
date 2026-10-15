@@ -221,7 +221,7 @@ module.exports = async function s4cHandoffHost(workspace) {
         // are open. Release OS handles only for the filesystem move; retain
         // the imported obligation and require Reset to install real owners.
         if (process.platform === 'win32') {
-            handles.filter(handle => !handle.closed).forEach(handle => handle.watcher.close());
+            tracker.disposeFileWatchers();
             await until('native handles to release the Windows move', () => handles.every(handle => handle.closed));
         }
         fs.renameSync(root, source);
@@ -239,13 +239,34 @@ module.exports = async function s4cHandoffHost(workspace) {
         assert.equal(recreated, true);
         assert.equal(tracker.importedCoverageObligations.has(root), true);
         assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        for (const directory of directories) {
+            assert.equal(tracker.supplementalDirectoryWatchers.get(directory)?.epoch, tracker.sessionEpoch,
+                'retry must acquire each current-epoch imported owner');
+            assert.ok(handles.some(handle => handle.directory === directory && !handle.closed),
+                'retry must retain an open native handle for each imported directory');
+        }
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
         tracker.fileWatchers.forEach(watcher => watcher.dispose());
         tracker.fileWatchers = [];
         await delay(250);
         fs.writeFileSync(files[1], 'native edit after rejected stale retirement and retry\n');
-        await until('native-only nested edit after stale retirement refusal', () =>
-            tracker.getTrackedChanges().some(change => change.filePath === files[1] &&
-                change.currentContent === 'native edit after rejected stale retirement and retry\n'));
+        try {
+            await until('native-only nested edit after stale retirement refusal', () =>
+                tracker.getTrackedChanges().some(change => change.filePath === files[1] &&
+                    change.currentContent === 'native edit after rejected stale retirement and retry\n'));
+        } catch (error) {
+            console.error('S4-C retirement retry diagnostics:', JSON.stringify({
+                recording: tracker.isRecording, epoch: tracker.sessionEpoch,
+                externalWatcherEnabled: tracker.externalWatcherEnabled,
+                baseline: tracker.getBaselineState(), gaps: tracker.getSubtreeCoverageGaps(),
+                owners: [...tracker.supplementalDirectoryWatchers].map(([directory, owner]) =>
+                    ({ directory, epoch: owner.epoch, eventRevision: owner.eventRevision })),
+                handles: handles.map(({ directory, closed }) => ({ directory, closed })),
+                changes: tracker.getTrackedChanges().map(change =>
+                    ({ filePath: change.filePath, currentContent: change.currentContent, unavailableReason: change.unavailableReason }))
+            }));
+            throw error;
+        }
         tracker.stopRecording();
         console.log('PASS HOST-S4-C imported handoff and Issue #45 stopped Clear → Reload → Start retain native observation');
     } finally {
