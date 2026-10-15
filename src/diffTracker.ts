@@ -784,6 +784,8 @@ export class DiffTracker {
     // Persisted as restart uncertainty, never as proof that an OS handle lives.
     private importedCoverageObligations = new Set<string>();
     private readonly importedCoverageRestartCode = 'imported-coverage-restart-required';
+    private readonly importedCoverageRestartReason =
+        'Imported-directory observation must be independently restored and reconciled before this subtree is trusted.';
     private pendingImportedDirectoryReconciliation = new Set<string>();
     private importedDirectoryResumePromise?: Promise<void>;
     private ignoreMatchers = new Map<string, Ignore>();
@@ -1428,7 +1430,7 @@ export class DiffTracker {
         }
         let startupSupplementalPlan: SupplementalCoveragePlan | undefined;
         if (this.effectiveMonitoringScope.kind === 'configured') {
-            startupSupplementalPlan = this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope);
+            startupSupplementalPlan = this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true);
             if (startupSupplementalPlan.issue) {
                 vscode.window.showWarningMessage(
                     `Code Diff Tracker: Supplemental coverage cannot be established at ${startupSupplementalPlan.issue}. Narrow the scope before rebuilding.`
@@ -1439,7 +1441,7 @@ export class DiffTracker {
         this.sessionWorkspaceRoots = this.getWorkspaceRoots();
         this.importedCoverageObligations = new Set(startupSupplementalPlan?.importedTargets ??
             [...this.importedCoverageObligations].filter(root => this.sessionWorkspaceRoots.some(workspaceRoot =>
-                this.pathBelongsToRoot(root, workspaceRoot))));
+                this.pathBelongsToRoot(root, workspaceRoot)) && this.importedCoverageTargetExistsForNewBaseline(root)));
         if (this.effectiveMonitoringScope.kind === 'legacyV3') {
             this.effectiveMonitoringScope = this.createLegacyEffectiveScopeForRoots(this.sessionWorkspaceRoots);
         }
@@ -1574,7 +1576,7 @@ export class DiffTracker {
         const previousEpoch = this.sessionEpoch;
         const plannedImportedObligations = [...this.importedCoverageObligations];
         const supplementalPlan = this.isRecording && this.effectiveMonitoringScope.kind === 'configured'
-            ? this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope) : undefined;
+            ? this.configuredSupplementalCoveragePlan(this.effectiveMonitoringScope, undefined, true) : undefined;
         if (supplementalPlan?.issue) {
             vscode.window.showWarningMessage(`Code Diff Tracker: Supplemental coverage cannot be rebuilt at ${supplementalPlan.issue}. Prior review is preserved.`);
             return false;
@@ -1806,7 +1808,7 @@ export class DiffTracker {
         this.sessionWorkspaceRoots = this.getWorkspaceRoots();
         this.importedCoverageObligations = new Set(supplementalPlan?.importedTargets ??
             [...this.importedCoverageObligations].filter(root => this.sessionWorkspaceRoots.some(workspaceRoot =>
-                this.pathBelongsToRoot(root, workspaceRoot))));
+                this.pathBelongsToRoot(root, workspaceRoot)) && this.importedCoverageTargetExistsForNewBaseline(root)));
         this.clearRetiredImportedRestartGaps(previous.importedCoverageObligations);
         this.clearExternalChangeTimers();
         this.clearDocumentChangeTimers();
@@ -1883,6 +1885,7 @@ export class DiffTracker {
             snapshotInitialized: this.snapshotInitialized, baselineBuilding: this.baselineBuilding,
             workspaceContextChanged: this.workspaceContextChanged,
             scanCoverage: this.scanCoverage,
+            effectiveMonitoringScope: this.effectiveMonitoringScope,
             retainedReviewPaths: this.retainedReviewPaths,
             coverageGaps: this.coverageGaps,
             importedCoverageObligations: this.importedCoverageObligations,
@@ -2130,12 +2133,23 @@ export class DiffTracker {
             record?.subtree?.reasonCode === this.importedCoverageRestartCode;
     }
 
+    private importedCoverageTargetExistsForNewBaseline(root: string): boolean {
+        try { return fs.lstatSync(root).isDirectory(); }
+        catch (error) {
+            // Only a proven missing target is retired for a new baseline.
+            // Permission or identity uncertainty must still fail visibly.
+            return !this.isFileNotFound(error);
+        }
+    }
+
     private importedCoverageTargets(
         scope: EffectiveMonitoringScope,
-        identityBudget: PathIdentityWorkBudget
+        identityBudget: PathIdentityWorkBudget,
+        newBaseline = false
     ): string[] {
         return [...this.importedCoverageObligations].filter(root => {
             if (identityBudget.exhausted) { return false; }
+            if (newBaseline && !this.importedCoverageTargetExistsForNewBaseline(root)) { return false; }
             const folder = this.owningWorkspaceFolderForTraversal(root);
             if (!folder) { return false; }
             if (scope.kind !== 'configured') { return true; }
@@ -2157,7 +2171,7 @@ export class DiffTracker {
                 targetKind: 'subtree',
                 reasonCode: this.importedCoverageRestartCode,
                 reason: record?.subtree?.reason ??
-                    'Imported-directory observation must be independently restored and reconciled before this subtree is trusted.'
+                    this.importedCoverageRestartReason
             }
         };
     }
@@ -5774,9 +5788,27 @@ export class DiffTracker {
         );
     }
 
+    private isDormantClearedStoppedImportRestartGap(targetPath: string, evidence: CoverageGapEvidence): boolean {
+        // A completed stopped Clear has no saved review or before-image left to
+        // protect. The serialised import marker is a *future Start* obligation,
+        // not a current watcher failure (there are no live watchers while stopped).
+        // Keep the durable obligation: configured and legacy Start still need to
+        // reacquire direct owners before claiming fresh recording coverage.
+        if (this.isRecording || this.baselineBuilding || !this.snapshotInitialized ||
+            evidence.targetKind !== 'subtree' || evidence.reasonCode !== this.importedCoverageRestartCode ||
+            evidence.reason !== this.importedCoverageRestartReason ||
+            !this.importedCoverageObligations.has(targetPath)) { return false; }
+        return this.fileSnapshots.size === 0 && this.baselineExistingFiles.size === 0 &&
+            this.unresolvedBaselineFiles.size === 0 && this.opaqueBaselineFiles.size === 0 &&
+            this.largeFileReminders.size === 0 && this.retainedReviewPaths.size === 0 &&
+            this.trackedChanges.size === 0 && this.revertHistory.length === 0 &&
+            this.baselineGitContexts.size === 0 && this.pendingScopeSuspendedPaths.size === 0;
+    }
+
     private isDormantCoverageGap(targetPath: string, evidence: CoverageGapEvidence): boolean {
         return this.isDormantPendingScopeGap(targetPath, evidence) ||
-            this.isDormantExcludedDirectoryGap(targetPath, evidence);
+            this.isDormantExcludedDirectoryGap(targetPath, evidence) ||
+            this.isDormantClearedStoppedImportRestartGap(targetPath, evidence);
     }
 
     public getCoverageGaps(): Array<[string, string]> {
@@ -6613,7 +6645,8 @@ export class DiffTracker {
 
     private configuredSupplementalCoveragePlan(
         scope: CanonicalMonitoringScope,
-        providedIdentityBudget?: PathIdentityWorkBudget
+        providedIdentityBudget?: PathIdentityWorkBudget,
+        newBaseline = false
     ): SupplementalCoveragePlan {
         const identityBudget = providedIdentityBudget ?? { remainingEntries: this.maxPathIdentityPreparationEntries };
         const targets: string[] = [];
@@ -6703,7 +6736,7 @@ export class DiffTracker {
                 }
             }
         }
-        const importedTargets = this.importedCoverageTargets({ kind: 'configured', ...scope }, identityBudget);
+        const importedTargets = this.importedCoverageTargets({ kind: 'configured', ...scope }, identityBudget, newBaseline);
         if (identityBudget.exhausted) {
             return { targets: [], issue: 'imported coverage path-identity preparation budget exceeded' };
         }
