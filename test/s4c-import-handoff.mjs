@@ -555,7 +555,10 @@ export function registerS4CImportHandoff(h, fixture) {
         tracker = new DiffTracker(storage); setTracker(tracker);
         assert.equal(await tracker.restorePersistedState(), 'restored');
         assert.equal(tracker.getIsRecording(), false);
-        assert.ok(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported));
+        assert.equal(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported), false,
+            'empty stopped review presents the retained import obligation as dormant, not a live warning');
+        assert.equal(tracker.importedCoverageObligations.has(imported), true,
+            'the dormant obligation must remain durable until explicit exclusion retires it');
         const requested = validateAndCanonicalizeScope({mode:'wholeWorkspace', includes:[],
             excludes:[{scope:'all',pattern:'retired-stopped-import'}]}, tracker.currentWorkspaceRootIdentities());
         assert.equal((await tracker.applyConfiguredMonitoringScope(requested.scope, false, () => true)).status, 'applied');
@@ -709,6 +712,12 @@ export function registerS4CImportHandoff(h, fixture) {
         const reloaded = JSON.parse(fs.readFileSync(path.join(storage.fsPath, 'session-state.json'), 'utf8'));
         assert.equal(reloaded.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true,
             'keeping the future direct-watcher restoration plan must not imply a current runtime failure');
+        await tracker.dispose();
+        tracker = new DiffTracker(storage); setTracker(tracker);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), [],
+            'a second stopped reload must not resurrect the dormant diagnostic');
+        assert.equal(tracker.importedCoverageObligations.has(imported), true);
         tracker.startRecording();
         await waitUntil(() => tracker.getBaselineState() === 'ready');
         assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
