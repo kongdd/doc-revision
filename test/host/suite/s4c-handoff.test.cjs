@@ -169,7 +169,49 @@ module.exports = async function s4cHandoffHost(workspace) {
         assert.equal(stopped.isRecording, false);
         assert.equal(new Map(stopped.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required');
-        console.log('PASS HOST-S4-C populated import, Keep, pending restart, Reset, later native-only edits and Stop remain safe');
+
+        // Issue #45: real Extension Host, non-Git imported directory, stopped
+        // Clear followed by process-level tracker restoration. The old restart
+        // obligation is future Start work, not a live stopped-state warning.
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const cleared = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+        assert.equal(cleared.isRecording, false);
+        assert.equal(new Map(cleared.coverageGaps).get(root)?.importedCoverageRequired, true);
+        await tracker.dispose();
+        tracker = new DiffTracker(vscode.Uri.file(storage));
+        assert.equal(await tracker.restorePersistedState(), 'restored', tracker.getPersistenceIssue());
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.deepEqual(tracker.getCoverageGaps(), []);
+        const { DiffTreeDataProvider } = require('../../../out/diffTreeView.js');
+        const { StatusBarManager } = require('../../../out/statusBarManager.js');
+        const tree = new DiffTreeDataProvider(tracker);
+        const status = new StatusBarManager(tracker);
+        try {
+            assert.equal((await tree.getChildren()).some(item => item.label === 'Monitoring Coverage Limited'), false);
+            assert.equal(status.statusBarItem.text, '$(circle-outline) Not Recording');
+        } finally {
+            tree.dispose();
+            status.dispose();
+        }
+        assert.equal(tracker.startRecording(), true);
+        await until('fresh baseline after stopped Clear and restore', () => tracker.getBaselineState() === 'ready');
+        assert.equal(tracker.getSubtreeCoverageGaps().length, 0);
+        for (const directory of directories) {
+            assert.equal(tracker.supplementalDirectoryWatchers.get(directory)?.epoch, tracker.sessionEpoch,
+                'the new recording must independently restore each imported native watcher');
+        }
+        tracker.fileWatchers.forEach(watcher => watcher.dispose());
+        tracker.fileWatchers = [];
+        await delay(250);
+        fs.writeFileSync(files[0], 'native edit after stopped Clear reload Start\n');
+        await until('native-only edit after Issue #45 restart', () =>
+            tracker.getTrackedChanges().some(change =>
+                change.filePath === files[0] && change.currentContent === 'native edit after stopped Clear reload Start\n'));
+        tracker.stopRecording();
+        console.log('PASS HOST-S4-C imported handoff and Issue #45 stopped Clear → Reload → Start retain native observation');
     } finally {
         fs.watch = nativeWatch;
         await tracker.dispose();
