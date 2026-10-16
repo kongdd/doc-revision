@@ -105,6 +105,20 @@ export function registerArchivedGitReview(h) {
 
     const readState = (storage, name = PRIMARY) => JSON.parse(fs.readFileSync(path.join(storage, name), 'utf8'));
     const changeFor = (tracker, target) => tracker.getTrackedChanges().find(change => change.filePath === target);
+    function assertStoppedRollbackReview(ctx, before) {
+        const change = changeFor(ctx.tracker, ctx.target);
+        assert.ok(change);
+        assert.equal(before.version, 5);
+        assert.ok(before.stoppedReviews.some(review => review.filePath === ctx.target));
+        // Archive reconciliation deliberately preserves intervening observations
+        // on rollback. V5 must persist that same current view without changing any
+        // baseline, provenance, unrelated review or original backup content.
+        const expected = {...before, stoppedReviews:before.stoppedReviews.map(review =>
+            review.filePath === ctx.target ? {...review, currentContent:change.currentContent,
+                timestamp:change.timestamp.getTime()} : review)};
+        assert.deepEqual(readState(ctx.storage), expected);
+        assert.deepEqual(readState(ctx.storage, BACKUP), before);
+    }
     async function ready(tracker) {
         const preview = await tracker.previewArchivedGitReview();
         assert.equal(preview.status, 'ready', preview.reason);
@@ -282,8 +296,7 @@ export function registerArchivedGitReview(h) {
         assert.equal(watcherInstances.some(watcher => watcher.active), false);
         assert.equal(ctx.tracker.getOriginalContent(ctx.target), 'main pending review\n');
         assert.equal(changeFor(ctx.tracker, ctx.target)?.currentContent, 'new work during stopped archive reconciliation\n');
-        assert.deepEqual(readState(ctx.storage), before);
-        assert.deepEqual(readState(ctx.storage, BACKUP), before);
+        assertStoppedRollbackReview(ctx, before);
         assert.deepEqual(fs.readFileSync(path.join(ctx.storage, ARCHIVE)), ctx.archive);
         assert.equal(fs.existsSync(path.join(ctx.storage, INTENT)), false);
         assert.deepEqual(tree(ctx.workspace), disk);
@@ -593,8 +606,7 @@ export function registerArchivedGitReview(h) {
         assert.equal(watcherInstances.some(watcher => watcher.active), false);
         assert.equal(ctx.tracker.getOriginalContent(ctx.target), 'main pending review\n');
         assert.equal(changeFor(ctx.tracker, ctx.target)?.currentContent, doc.text);
-        assert.deepEqual(readState(ctx.storage), before);
-        assert.deepEqual(readState(ctx.storage, BACKUP), before);
+        assertStoppedRollbackReview(ctx, before);
         assert.deepEqual(fs.readFileSync(path.join(ctx.storage, ARCHIVE)), ctx.archive);
         assert.equal(fs.existsSync(path.join(ctx.storage, INTENT)), false);
         assert.deepEqual(tree(ctx.workspace), disk);

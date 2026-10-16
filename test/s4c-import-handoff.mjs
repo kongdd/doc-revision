@@ -7,6 +7,16 @@ import { validateAndCanonicalizeScope } from '../out/monitoringScope.js';
 export function registerS4CImportHandoff(h, fixture) {
     registerS4CStaleHandoff(h, fixture);
     const {test, Uri, DiffTracker, nativeDirectoryWatchers, waitUntil, setTracker} = h;
+    function assertCurrentCoverageOrGap(tracker, directory) {
+        const direct = tracker.supplementalDirectoryWatchers.get(directory) ??
+            tracker.importedDirectoryWatchers.get(directory);
+        const currentOwner = direct?.epoch === tracker.sessionEpoch &&
+            nativeDirectoryWatchers.some(owner => owner.active && owner.directory === directory);
+        const explicitGap = tracker.getSubtreeCoverageGaps().some(gap =>
+            directory === gap.targetPath || directory.startsWith(`${gap.targetPath}${path.sep}`));
+        assert.ok(currentOwner || explicitGap,
+            `retained obligation at ${directory} requires a current owner or an explicit covering gap`);
+    }
     test('S4-C imported directory releases the bridge only after persistent coverage and captures post-Keep edits', () => fixture(async ({tracker,dir}) => {
         const imported = path.join(dir, 'imported');
         const nested = path.join(imported, 'nested');
@@ -41,7 +51,7 @@ export function registerS4CImportHandoff(h, fixture) {
         for (let iteration = 0; iteration < 2; iteration++) {
             assert.equal(await tracker.flushPendingPersistence(), true);
             const saved = JSON.parse(fs.readFileSync(path.join(storage.fsPath, 'session-state.json'), 'utf8'));
-            assert.equal(saved.version, 4);
+            assert.equal(saved.version, 5);
             assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].subtree.reasonCode,
                 'imported-coverage-restart-required');
             assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
@@ -555,7 +565,10 @@ export function registerS4CImportHandoff(h, fixture) {
         tracker = new DiffTracker(storage); setTracker(tracker);
         assert.equal(await tracker.restorePersistedState(), 'restored');
         assert.equal(tracker.getIsRecording(), false);
-        assert.ok(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported));
+        assert.equal(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported), false,
+            'empty stopped review presents the retained import obligation as dormant, not a live warning');
+        assert.equal(tracker.importedCoverageObligations.has(imported), true,
+            'the dormant obligation must remain durable until explicit exclusion retires it');
         const requested = validateAndCanonicalizeScope({mode:'wholeWorkspace', includes:[],
             excludes:[{scope:'all',pattern:'retired-stopped-import'}]}, tracker.currentWorkspaceRootIdentities());
         assert.equal((await tracker.applyConfiguredMonitoringScope(requested.scope, false, () => true)).status, 'applied');
@@ -687,6 +700,7 @@ export function registerS4CImportHandoff(h, fixture) {
         const target = path.join(imported, 'new.txt');
         fs.writeFileSync(target, 'before Clear');
         await tracker.onExternalFileCreated(Uri.file(imported));
+        assert.equal(fs.existsSync(path.join(dir, '.git')), false, 'a Git repository is not required');
         tracker.stopRecording();
         assert.equal(await tracker.resetBaselineToCurrentState(), true);
         assert.equal(tracker.getTrackedChanges().length, 0);
@@ -695,6 +709,25 @@ export function registerS4CImportHandoff(h, fixture) {
         const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
         assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].subtree.reasonCode,
             'imported-coverage-restart-required');
+        const storage = tracker.storageUri;
+        await tracker.dispose();
+        tracker = new DiffTracker(storage); setTracker(tracker);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), [],
+            'Stop → Clear → Reload must not promote a dormant import restart obligation into an active warning');
+        assert.deepEqual(tracker.getCoverageGaps(), [], 'scope diagnostics must agree with the Changes Tree');
+        assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const reloaded = JSON.parse(fs.readFileSync(path.join(storage.fsPath, 'session-state.json'), 'utf8'));
+        assert.equal(reloaded.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true,
+            'keeping the future direct-watcher restoration plan must not imply a current runtime failure');
+        await tracker.dispose();
+        tracker = new DiffTracker(storage); setTracker(tracker);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), [],
+            'a second stopped reload must not resurrect the dormant diagnostic');
+        assert.equal(tracker.importedCoverageObligations.has(imported), true);
         tracker.startRecording();
         await waitUntil(() => tracker.getBaselineState() === 'ready');
         assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
@@ -703,6 +736,541 @@ export function registerS4CImportHandoff(h, fixture) {
         fs.writeFileSync(target, 'after Clear and Start');
         owner.listener('change', 'new.txt');
         await waitUntil(() => tracker.getTrackedChanges().some(change => change.currentContent === 'after Clear and Start'));
+    }));
+
+    test('Issue #45 retained stopped review keeps genuine restart uncertainty across reload', () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'retained-stopped');
+        fs.mkdirSync(imported);
+        const target = path.join(imported, 'review.txt');
+        fs.writeFileSync(target, 'saved review baseline');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        assert.equal((await tracker.keepAllChangesInFile(target)).status, 'success');
+        tracker.stopRecording();
+        const storage = tracker.storageUri;
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        await tracker.dispose();
+        tracker = new DiffTracker(storage); setTracker(tracker);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.equal(tracker.getIsRecording(), false);
+        assert.equal(tracker.getOriginalContent(target), 'saved review baseline');
+        assert.ok(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported),
+            'Stop without Clear must not suppress recovery evidence while an old review baseline remains');
+    }));
+
+    test('Issue #45 missing import after stopped Clear is not a false gap in a fresh recording', () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'removed-stopped');
+        fs.mkdirSync(imported);
+        fs.writeFileSync(path.join(imported, 'old.txt'), 'old content');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        tracker.stopRecording();
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        fs.rmSync(imported, { recursive: true, force: true });
+        const storage = tracker.storageUri;
+        await tracker.dispose();
+        tracker = new DiffTracker(storage); setTracker(tracker);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.equal(tracker.startRecording(), true);
+        await waitUntil(() => tracker.getBaselineState() === 'ready');
+        assert.equal(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported), false,
+            'absent historic import path is not a live watcher failure after a new baseline');
+        assert.equal(tracker.importedCoverageObligations.has(imported), false);
+        fs.mkdirSync(imported);
+        const recreated = path.join(imported, 'new.txt');
+        fs.writeFileSync(recreated, 'new creation');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        assert.equal(tracker.getTrackedChanges().find(change => change.filePath === recreated)?.currentContent,
+            'new creation', 'later recreation is handled as a new directory import');
+    }));
+
+    for (const scenario of ['ENOENT', 'ENOTDIR', 'file', 'directory', 'EACCES']) {
+        test(`Issue #45 retirement target probe classifies ${scenario} conservatively`, () => fixture(async ({tracker,dir}) => {
+            const parent = path.join(dir, 'probe-parent');
+            const imported = path.join(parent, 'imported');
+            fs.mkdirSync(parent);
+            if (scenario === 'ENOTDIR') {
+                fs.rmdirSync(parent);
+                fs.writeFileSync(parent, 'parent is now a file');
+            } else if (scenario === 'file') { fs.writeFileSync(imported, 'replacement file'); }
+            else if (scenario === 'directory') { fs.mkdirSync(imported); }
+            const lstat = fs.lstatSync;
+            if (scenario === 'EACCES') fs.lstatSync = (target, ...args) => {
+                if (target === imported) { throw Object.assign(new Error('denied'), {code:'EACCES'}); }
+                return lstat(target, ...args);
+            };
+            try {
+                assert.equal(tracker.importedCoverageTargetExistsForNewBaseline(imported),
+                    scenario === 'directory' || scenario === 'EACCES',
+                    'only proven absence or a non-directory retires an imported directory obligation');
+            } finally { fs.lstatSync = lstat; }
+        }));
+    }
+
+    test('Issue #45 Reset revalidates an absent import recreated during ignore refresh without an event', () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'reset-recreated');
+        const target = path.join(imported, 'review.txt');
+        fs.mkdirSync(imported);
+        fs.writeFileSync(target, 'accepted baseline');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        assert.equal((await tracker.keepAllChangesInFile(target)).status, 'success');
+        fs.rmSync(imported, {recursive:true});
+        const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+        let recreated = false;
+        tracker.refreshIgnoreMatchers = async (...args) => {
+            const result = await refresh(...args);
+            if (!recreated) {
+                recreated = true;
+                fs.mkdirSync(imported);
+                fs.writeFileSync(target, 'replacement current bytes');
+                // No synthetic create event: the filesystem changed while Reset awaited.
+            }
+            return result;
+        };
+        let reset;
+        try { reset = await tracker.resetBaselineToCurrentState(); }
+        finally { tracker.refreshIgnoreMatchers = refresh; }
+        assert.equal(recreated, true);
+        assert.equal(tracker.importedCoverageObligations.has(imported), true,
+            'a stale absence plan must never silently retire a recreated imported path');
+        if (!reset) {
+            assert.equal(tracker.getOriginalContent(target), 'accepted baseline',
+                'refused Reset must preserve the previously accepted baseline');
+        } else {
+            assert.ok(nativeDirectoryWatchers.some(owner => owner.active && owner.directory === imported),
+                'successful Reset must independently cover the recreated import');
+        }
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+        assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
+    }));
+
+    for (const barrier of ['install', 'scan']) test(`Issue #45 Start revalidates an absent import recreated during ${barrier} without an event`, () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, `start-recreated-${barrier}`);
+        fs.mkdirSync(imported);
+        fs.writeFileSync(path.join(imported, 'old.txt'), 'previous import');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        tracker.stopRecording();
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        fs.rmSync(imported, {recursive:true});
+        const method = barrier === 'install' ? 'installSupplementalCoverageTargets' : 'initializeWorkspaceSnapshots';
+        const original = tracker[method].bind(tracker);
+        let recreated = false;
+        let finished;
+        const completed = new Promise(resolve => { finished = resolve; });
+        tracker[method] = async (...args) => {
+            try {
+                const result = await original(...args);
+                if (!recreated) {
+                    recreated = true;
+                    fs.mkdirSync(imported);
+                    fs.writeFileSync(path.join(imported, 'new.txt'), 'recreated during Start');
+                }
+                return result;
+            } finally { finished(); }
+        };
+        try {
+            assert.equal(tracker.startRecording(), true);
+            await completed;
+            // Let the caller resume after the intercepted asynchronous boundary.
+            await new Promise(resolve => setImmediate(resolve));
+            await waitUntil(() => tracker.getBaselineState() !== 'building' ||
+                tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported));
+            assert.equal(recreated, true);
+            assert.equal(tracker.importedCoverageObligations.has(imported), true,
+                'Start must retain the obligation when its absence proof becomes stale');
+            const owner = nativeDirectoryWatchers.some(item => item.active && item.directory === imported);
+            const gap = tracker.getSubtreeCoverageGaps().some(item => item.targetPath === imported);
+            assert.ok(owner || gap || !tracker.getIsRecording(),
+                'recreated imports require direct observation or a visible failed/limited Start');
+        } finally { tracker[method] = original; }
+    }));
+
+    test('Issue #45 Reset retires absent imported owners without a phantom gap', () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'reset-retired');
+        fs.mkdirSync(imported);
+        fs.writeFileSync(path.join(imported, 'old.txt'), 'old import');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        const oldOwner = nativeDirectoryWatchers.find(owner => owner.active && owner.directory === imported);
+        assert.ok(oldOwner);
+        fs.rmSync(imported, {recursive:true});
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        assert.equal(tracker.importedCoverageObligations.has(imported), false);
+        assert.equal(oldOwner.active, false);
+        assert.equal(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported), false,
+            'a retired stale native owner must not regenerate uncertainty after a successful Reset');
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+        assert.equal(saved.coverageGaps.some(([root]) => root === imported), false);
+    }));
+
+    for (const barrier of ['install', 'scan', 'persist-write', 'persist-copy']) {
+        test(`Issue #45 Reset refuses retired import recreation after ${barrier}`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `reset-late-${barrier}`);
+            const target = path.join(imported, 'review.txt');
+            fs.mkdirSync(imported);
+            fs.writeFileSync(target, 'accepted original');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            assert.equal((await tracker.keepAllChangesInFile(target)).status, 'success');
+            fs.writeFileSync(target, 'pending before Reset');
+            await tracker.onExternalFileChanged(Uri.file(target));
+            await waitUntil(() => tracker.getTrackedChanges().some(change => change.filePath === target));
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            fs.rmSync(imported, {recursive:true});
+            const recreate = () => {
+                fs.mkdirSync(imported);
+                fs.writeFileSync(target, 'replacement during Reset');
+            };
+            let reset;
+            if (barrier.startsWith('persist-')) {
+                const copying = barrier === 'persist-copy';
+                const gate = h.pause(path.join(tracker.storageUri.fsPath,
+                    copying ? 'session-state.json' : 'session-state.tmp.json'), copying ? 'copy' : 'write');
+                const resetting = tracker.resetBaselineToCurrentState();
+                try {
+                    assert.equal(await Promise.race([gate.entered.then(() => 'entered'), resetting]), 'entered');
+                    recreate();
+                } finally { gate.release(); }
+                reset = await resetting;
+            } else {
+                const method = barrier === 'install' ? 'installSupplementalCoverageTargets' : 'initializeWorkspaceSnapshots';
+                const original = tracker[method].bind(tracker);
+                let inserted = false;
+                tracker[method] = async (...args) => {
+                    const result = await original(...args);
+                    if (!inserted) { inserted = true; recreate(); }
+                    return result;
+                };
+                try { reset = await tracker.resetBaselineToCurrentState(); }
+                finally { tracker[method] = original; }
+                assert.equal(inserted, true);
+            }
+            assert.equal(reset, false, 'Reset must reject stale absence evidence through durable publication');
+            assert.equal(tracker.getOriginalContent(target), 'accepted original');
+            assert.ok(tracker.getTrackedChanges().some(change => change.filePath === target),
+                'the failed Reset must retain review rather than accept replacement bytes');
+            assert.equal(tracker.importedCoverageObligations.has(imported), true);
+            assertCurrentCoverageOrGap(tracker, imported);
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+            assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
+        }));
+    }
+
+    for (const replaced of ['root', 'nested']) for (const barrier of ['scan', 'persist-copy']) {
+        test(`Issue #45 Reset rejects silent ${replaced} owner replacement during ${barrier}`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `owner-replaced-${replaced}-${barrier}`);
+            const nested = path.join(imported, 'nested');
+            const target = path.join(nested, 'review.txt');
+            fs.mkdirSync(nested, {recursive:true});
+            fs.writeFileSync(target, 'accepted owned content');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            assert.equal((await tracker.keepAllChangesInFile(target)).status, 'success');
+            fs.writeFileSync(target, 'pending owned review');
+            await tracker.onExternalFileChanged(Uri.file(target));
+            await waitUntil(() => tracker.getTrackedChanges().some(change => change.filePath === target));
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            const replace = () => {
+                const directory = replaced === 'root' ? imported : nested;
+                // Renaming keeps the old inode alive and guarantees a distinct
+                // replacement inode even on filesystems that reuse deleted inodes.
+                fs.renameSync(directory, `${directory}-old-inode`);
+                fs.mkdirSync(nested, {recursive:true});
+                fs.writeFileSync(target, 'silent replacement bytes');
+            };
+            let reset;
+            if (barrier === 'persist-copy') {
+                const gate = h.pause(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'copy');
+                const resetting = tracker.resetBaselineToCurrentState();
+                try {
+                    assert.equal(await Promise.race([gate.entered.then(() => 'entered'), resetting]), 'entered');
+                    replace();
+                } finally { gate.release(); }
+                reset = await resetting;
+            } else {
+                const initialize = tracker.initializeWorkspaceSnapshots.bind(tracker);
+                let replacedOnce = false;
+                tracker.initializeWorkspaceSnapshots = async (...args) => {
+                    const result = await initialize(...args);
+                    if (!replacedOnce) { replacedOnce = true; replace(); }
+                    return result;
+                };
+                try { reset = await tracker.resetBaselineToCurrentState(); }
+                finally { tracker.initializeWorkspaceSnapshots = initialize; }
+                assert.equal(replacedOnce, true);
+            }
+            assert.equal(reset, false, 'path spelling does not certify the native owner still observes its inode');
+            assert.equal(tracker.getOriginalContent(target), 'accepted owned content');
+            assert.ok(tracker.getTrackedChanges().some(change => change.filePath === target));
+            assert.equal(tracker.importedCoverageObligations.has(imported), true);
+            assertCurrentCoverageOrGap(tracker, replaced === 'root' ? imported : nested);
+        }));
+    }
+
+    for (const transition of ['Start', 'Reset']) test(`Issue #45 ${transition} superseding Start restores tentative retirement before planning`, () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'repeated-start-import');
+        const target = path.join(imported, 'review.txt');
+        fs.mkdirSync(imported);
+        fs.writeFileSync(target, 'old import');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        tracker.stopRecording();
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        fs.rmSync(imported, {recursive:true});
+        const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+        let entered, release, calls = 0;
+        const waiting = new Promise(resolve => { entered = resolve; });
+        const gate = new Promise(resolve => { release = resolve; });
+        tracker.refreshIgnoreMatchers = async (...args) => {
+            if (++calls === 1) { entered(); await gate; }
+            return refresh(...args);
+        };
+        try {
+            assert.equal(tracker.startRecording(), true);
+            await waiting;
+            assert.equal(tracker.importedCoverageObligations.has(imported), false,
+                'the older candidate must reach its tentative absent-root retirement');
+            fs.mkdirSync(imported);
+            fs.writeFileSync(target, `recreated before newer ${transition}`);
+            if (transition === 'Start') { assert.equal(tracker.startRecording(), true); }
+            else { await tracker.resetBaselineToCurrentState(); }
+            await waitUntil(() => tracker.getBaselineState() === 'ready' ||
+                tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === imported));
+            assert.equal(tracker.importedCoverageObligations.has(imported), true,
+                `the newer ${transition} must plan from restored committed obligations`);
+            assertCurrentCoverageOrGap(tracker, imported);
+            const newerEpoch = tracker.sessionEpoch;
+            release();
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(tracker.sessionEpoch, newerEpoch);
+            assert.equal(tracker.importedCoverageObligations.has(imported), true,
+                'the old continuation must not erase the newer obligation');
+            assertCurrentCoverageOrGap(tracker, imported);
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+            assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
+        } finally { release(); tracker.refreshIgnoreMatchers = refresh; }
+    }));
+
+    for (const transition of ['Start', 'Reset']) {
+        test(`Issue #45 failed ${transition} preflight cannot strand superseded Start in building`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `failed-takeover-${transition}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'known import');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            const initialize = tracker.initializeWorkspaceSnapshots.bind(tracker);
+            let entered, release, settled, calls = 0;
+            const waiting = new Promise(resolve => { entered = resolve; });
+            const gate = new Promise(resolve => { release = resolve; });
+            const finished = new Promise(resolve => { settled = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                if (++calls === 1) { entered(); await gate; }
+                return refresh(...args);
+            };
+            tracker.initializeWorkspaceSnapshots = async (...args) => {
+                try { return await initialize(...args); }
+                finally { settled(); }
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await waiting;
+                // This real unsupported watcher policy makes candidate planning
+                // fail before a replacement scan can take ownership.
+                h.setVsCodeExcludes({'files.watcherExclude': {'**/node_modules/*/**':true}});
+                const accepted = transition === 'Start' ? tracker.startRecording()
+                    : await tracker.resetBaselineToCurrentState();
+                assert.equal(accepted, false, 'the replacement preflight must actually refuse');
+                h.setVsCodeExcludes({});
+                release();
+                await finished;
+                await new Promise(resolve => setImmediate(resolve));
+                assert.notEqual(tracker.getBaselineState(), 'building',
+                    'a rejected takeover must resume the earlier scan or explicitly pause, never leave a dead Starting state');
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                if (tracker.getIsRecording()) {
+                    assert.equal(tracker.getBaselineState(), 'ready');
+                    assertCurrentCoverageOrGap(tracker, imported);
+                } else {
+                    assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false,
+                        'an explicitly paused failed takeover must not retain live native observers');
+                }
+            } finally {
+                release(); h.setVsCodeExcludes({});
+                tracker.refreshIgnoreMatchers = refresh;
+                tracker.initializeWorkspaceSnapshots = initialize;
+            }
+        }));
+    }
+
+    for (const failure of ['refresh-throw', 'retired-recreated', 'planning-throw']) {
+        test(`Issue #45 takeover ${failure} explicitly pauses an abandoned Start`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `takeover-failure-${failure}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'old.txt'), 'old imported bytes');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            if (failure === 'retired-recreated') { fs.rmSync(imported, {recursive:true}); }
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            const plan = tracker.configuredSupplementalCoveragePlan.bind(tracker);
+            let entered, release, calls = 0;
+            const waiting = new Promise(resolve => { entered = resolve; });
+            const gate = new Promise(resolve => { release = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                const call = ++calls;
+                if (call === 1) { entered(); await gate; }
+                if (call === 2 && failure === 'refresh-throw') { throw new Error('injected refresh failure'); }
+                const result = await refresh(...args);
+                if (call === 2 && failure === 'retired-recreated') { fs.mkdirSync(imported); }
+                return result;
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await waiting;
+                if (failure === 'planning-throw') {
+                    tracker.configuredSupplementalCoveragePlan = () => { throw new Error('injected planning failure'); };
+                    assert.throws(() => tracker.startRecording(), /injected planning failure/);
+                } else { assert.equal(await tracker.resetBaselineToCurrentState(), false); }
+                assert.equal(tracker.getIsRecording(), false);
+                assert.equal(tracker.getBaselineState(), 'idle');
+                assert.equal(tracker.snapshotInitialized, false);
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false);
+                release();
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(await tracker.flushPendingPersistence(), true);
+                const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+                assert.equal(saved.isRecording, false);
+                assert.equal(saved.baselineState, 'building', 'abandoned partial capture must not persist Ready');
+                assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);
+            } finally {
+                release(); tracker.refreshIgnoreMatchers = refresh;
+                tracker.configuredSupplementalCoveragePlan = plan;
+            }
+        }));
+    }
+
+    for (const newer of ['Start', 'Stop']) {
+        test(`Issue #45 old Reset refresh failure cannot pause newer ${newer} epoch`, () => fixture(async ({tracker,dir}) => {
+            const imported = path.join(dir, `takeover-newer-${newer}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'known imported baseline');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            tracker.stopRecording();
+            const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+            let enterStart, releaseStart, enterReset, releaseReset, calls = 0;
+            const startWaiting = new Promise(resolve => { enterStart = resolve; });
+            const startGate = new Promise(resolve => { releaseStart = resolve; });
+            const resetWaiting = new Promise(resolve => { enterReset = resolve; });
+            const resetGate = new Promise(resolve => { releaseReset = resolve; });
+            tracker.refreshIgnoreMatchers = async (...args) => {
+                const call = ++calls;
+                if (call === 1) { enterStart(); await startGate; }
+                if (call === 2) { enterReset(); await resetGate; throw new Error('late old Reset failure'); }
+                return refresh(...args);
+            };
+            try {
+                assert.equal(tracker.startRecording(), true);
+                await startWaiting;
+                const resetting = tracker.resetBaselineToCurrentState();
+                await resetWaiting;
+                if (newer === 'Start') {
+                    assert.equal(tracker.startRecording(), true);
+                    await waitUntil(() => tracker.getBaselineState() === 'ready');
+                } else { tracker.stopRecording(); }
+                const epoch = tracker.sessionEpoch;
+                const initialized = tracker.snapshotInitialized;
+                releaseReset();
+                assert.equal(await resetting, false);
+                releaseStart();
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(tracker.sessionEpoch, epoch, 'old failure must not call Stop on the newer epoch');
+                assert.equal(tracker.getIsRecording(), newer === 'Start');
+                assert.equal(tracker.getBaselineState(), newer === 'Start' ? 'ready' : 'idle');
+                assert.equal(tracker.snapshotInitialized, initialized);
+                assert.equal(tracker.importedCoverageObligations.has(imported), true);
+                if (newer === 'Start') { assertCurrentCoverageOrGap(tracker, imported); }
+                else { assert.equal(nativeDirectoryWatchers.some(owner => owner.active), false); }
+            } finally { releaseReset(); releaseStart(); tracker.refreshIgnoreMatchers = refresh; }
+        }));
+    }
+
+    for (const transition of ['Start', 'Reset']) {
+        test(`Issue #45 ${transition} Ready publishes only after transaction release and permits immediate scope Apply`, () => fixture(async ({tracker,dir,scope}) => {
+            const imported = path.join(dir, `ready-barrier-${transition}`);
+            fs.mkdirSync(imported);
+            fs.writeFileSync(path.join(imported, 'review.txt'), 'baseline at Ready');
+            await tracker.onExternalFileCreated(Uri.file(imported));
+            if (transition === 'Start') { tracker.stopRecording(); }
+            let observed = false, transactionAtReady, applying;
+            let notifyReady;
+            const ready = new Promise(resolve => { notifyReady = resolve; });
+            const subscription = tracker.onDidChangeBaselineState(state => {
+                if (state !== 'ready' || observed) { return; }
+                observed = true;
+                // These observations happen synchronously in the Ready listener,
+                // without yielding or waiting for persistence to catch up.
+                transactionAtReady = tracker.baselineTransaction;
+                applying = tracker.applyConfiguredMonitoringScope(scope, false, () => true);
+                notifyReady();
+            });
+            try {
+                if (transition === 'Start') { assert.equal(tracker.startRecording(), true); }
+                else { assert.equal(await tracker.resetBaselineToCurrentState(), true); }
+                await ready;
+                const result = await applying;
+                // Allow the earlier operation to settle before fixture disposal;
+                // this cannot change the values captured by the Ready listener.
+                await waitUntil(() => tracker.baselineTransaction === undefined);
+                assert.deepEqual({transactionReleased: transactionAtReady === undefined, applyStatus: result.status},
+                    {transactionReleased:true, applyStatus:'applied'},
+                    `Ready must be an actionable completion boundary: ${JSON.stringify(result)}`);
+            } finally { subscription.dispose(); }
+        }));
+    }
+
+    test('Issue #45 unchanged imported owners complete Start and observe later edits', () => fixture(async ({tracker,dir}) => {
+        const imported = path.join(dir, 'start-stable-owner');
+        const nested = path.join(imported, 'nested');
+        const target = path.join(nested, 'review.txt');
+        fs.mkdirSync(nested, {recursive:true});
+        fs.writeFileSync(target, 'fresh Start baseline');
+        await tracker.onExternalFileCreated(Uri.file(imported));
+        tracker.stopRecording();
+        assert.equal(tracker.startRecording(), true);
+        await waitUntil(() => tracker.getBaselineState() === 'ready');
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.equal(tracker.importedCoverageObligations.has(imported), true);
+        assert.equal(tracker.getOriginalContent(target), 'fresh Start baseline');
+        const owner = nativeDirectoryWatchers.find(item => item.active && item.directory === nested);
+        assert.ok(owner);
+        fs.writeFileSync(target, 'observed after stable Start');
+        owner.listener('change', 'review.txt');
+        await waitUntil(() => tracker.getTrackedChanges().some(change =>
+            change.filePath === target && change.currentContent === 'observed after stable Start'));
+        assert.equal(tracker.getOriginalContent(target), 'fresh Start baseline');
+    }));
+
+    test('Issue #45 failed stopped Clear rolls back legacy effective scope with the old review', () => fixture(async ({tracker,dir}) => {
+        const baselinePath = path.join(dir, 'legacy-review.txt');
+        tracker.fileSnapshots.set(baselinePath, 'before Clear');
+        tracker.baselineExistingFiles.add(baselinePath);
+        const previousScope = tracker.createLegacyEffectiveScopeForRoots([dir]);
+        tracker.effectiveMonitoringScope = previousScope;
+        tracker.stopRecording();
+        tracker.getLegacyGlobalWatchExcludePatterns = () => ['late-legacy-policy'];
+        const originalFlush = tracker.flushPersistState.bind(tracker);
+        tracker.flushPersistState = async (completed, transaction, ...rest) =>
+            transaction ? false : originalFlush(completed, transaction, ...rest);
+        try {
+            assert.equal(await tracker.resetBaselineToCurrentState(), false);
+            assert.deepEqual(tracker.getEffectiveMonitoringScope(), previousScope,
+                'failed Clear must not publish an uncommitted compatibility scope');
+            assert.equal(tracker.fileSnapshots.get(baselinePath), 'before Clear');
+            assert.equal(tracker.baselineExistingFiles.has(baselinePath), true);
+        } finally {
+            tracker.flushPersistState = originalFlush;
+        }
     }));
 
     for (const interruption of ['edit', 'stop']) test(`S4-C ${interruption} during reconciliation cannot release stale bridges or declare coverage`, () => fixture(async ({tracker,dir}) => {

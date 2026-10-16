@@ -178,7 +178,7 @@ exports.prepare = async () => {
             disposed = true;
             await until('first Host disposal to release native owners', () => handles.every(handle => handle.closed));
             const saved = JSON.parse(fs.readFileSync(f.statePath, 'utf8'));
-            assert.equal(saved.version, 4);
+            assert.equal(saved.version, 5);
             assert.equal(saved.isRecording, true);
             assert.equal(new Map(saved.coverageGaps).get(f.root)?.importedCoverageRequired, true);
             assert.equal(new Map(saved.coverageGaps).get(f.root)?.subtree?.reasonCode, 'imported-coverage-restart-required');

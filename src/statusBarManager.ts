@@ -65,18 +65,22 @@ export class StatusBarManager {
     }
 
     private updateStatusBar(isRecording: boolean) {
+        const stoppedReviewHint = isRecording ? '' :
+            '\nRecording stopped. Captured changes are preserved. Already-open Live File diffs still show the working file, including later edits.' +
+            '\nTo view the stopped snapshot, right-click a changed file in Change Recording and choose Open Native Review Snapshot.';
         const subtreeGaps = this.diffTracker.getSubtreeCoverageGaps();
         if (subtreeGaps.length > 0) {
             this.statusBarItem.text = '$(warning) Coverage Limited';
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.statusBarItem.command = 'diffTracker.manageMonitoringScope';
             this.statusBarItem.tooltip =
-                `Monitoring coverage is limited for ${subtreeGaps.length} subtree(s). Click to review diagnostics and recovery options.`;
+                `Monitoring coverage is limited for ${subtreeGaps.length} subtree(s). Click to review diagnostics and recovery options.` +
+                stoppedReviewHint;
             return;
         }
 
         this.statusBarItem.command = 'diffTracker.toggleRecording';
-        this.statusBarItem.tooltip = 'Toggle Diff Recording';
+        this.statusBarItem.tooltip = 'Toggle Diff Recording' + stoppedReviewHint;
         if (isRecording) {
             this.statusBarItem.text = '$(circle-filled) Recording';
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');

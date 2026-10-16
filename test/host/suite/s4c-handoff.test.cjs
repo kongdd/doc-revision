@@ -23,7 +23,11 @@ module.exports = async function s4cHandoffHost(workspace) {
     // Stage outside every workspace while retaining a genuine same-filesystem
     // move, avoiding exposure of staging to workspace-scoped observers.
     const source = fs.mkdtempSync(path.join(path.dirname(workspace), 's4c-import-source-'));
-    const root = vscode.Uri.file(path.join(workspace, 's4c-import-owner')).fsPath;
+    // Keep the configured include present while its imported child disappears.
+    // Otherwise Reset refuses the missing include before reaching the refresh race.
+    const includedParent = vscode.Uri.file(path.join(workspace, 's4c-import-owner')).fsPath;
+    fs.mkdirSync(includedParent);
+    const root = path.join(includedParent, 'imported');
     const nested = path.join(root, 'deep');
     const directories = [root, nested];
     const files = [path.join(root, 'readme.txt'), path.join(nested, 'tracked.txt')];
@@ -121,7 +125,7 @@ module.exports = async function s4cHandoffHost(workspace) {
             'restart uncertainty must not be presented as a current runtime coverage gap');
         assert.equal(await tracker.flushPendingPersistence(), true);
         const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
-        assert.equal(saved.version, 4);
+        assert.equal(saved.version, 5);
         assert.equal(new Map(saved.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required', 'saved review must not claim that an OS handle survives restart');
         assert.equal(new Map(saved.coverageGaps).get(root)?.importedCoverageRequired, true);
@@ -169,11 +173,152 @@ module.exports = async function s4cHandoffHost(workspace) {
         assert.equal(stopped.isRecording, false);
         assert.equal(new Map(stopped.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required');
-        console.log('PASS HOST-S4-C populated import, Keep, pending restart, Reset, later native-only edits and Stop remain safe');
+
+        // Issue #45: real filesystem work after Stop must stay outside the
+        // frozen review, including across same-process tracker restoration.
+        const reviewSnapshot = () => JSON.parse(JSON.stringify(tracker.getTrackedChanges()))
+            .sort((left, right) => left.filePath.localeCompare(right.filePath));
+        const frozenReviews = reviewSnapshot();
+        const frozenBaselines = files.map(filePath => [filePath, tracker.getOriginalContent(filePath)]);
+        assert.equal(frozenReviews.length, files.length);
+        assert.equal(frozenReviews.find(change => change.filePath === files[0])?.currentContent,
+            'native edit after pending restart and Reset\n');
+        const stoppedAddition = path.join(nested, 'created-after-Stop.txt');
+        fs.writeFileSync(files[0], 'unrecorded native edit after Stop\n');
+        fs.writeFileSync(stoppedAddition, 'unrecorded native addition after Stop\n');
+        await delay(250);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'stopped native edits must not refresh the review');
+        await tracker.dispose();
+        tracker = new DiffTracker(vscode.Uri.file(storage));
+        assert.equal(await tracker.restorePersistedState(), 'restored', tracker.getPersistenceIssue());
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'reload must restore exactly the pending Stop-time review');
+        assert.equal(tracker.getOriginalContent(stoppedAddition), undefined,
+            'reload must not discover a file created after Stop');
+        assert.equal(tracker.getTrackedChanges().some(change => change.filePath === stoppedAddition), false);
+        assert.equal(tracker.activeDirectDirectoryWatcherCount(tracker.sessionEpoch), 0);
+        assert.equal(tracker.fileWatchers.length, 0);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const stateBeforeStaleAction = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+        const diskBeforeStaleAction = [files[0], stoppedAddition].map(filePath => fs.readFileSync(filePath));
+        const frozenToken = tracker.getReviewToken(files[0]);
+        assert.ok(frozenToken, 'the restored frozen text remains inspectable');
+        const staleKeep = await tracker.keepAllChangesInFile(files[0], frozenToken);
+        assert.equal(staleKeep.status, 'conflict', JSON.stringify(staleKeep));
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'stale Keep must not refresh a frozen review');
+        assert.deepEqual(tracker.getReviewToken(files[0]), frozenToken);
+        assert.deepEqual(files.map(filePath => [filePath, tracker.getOriginalContent(filePath)]), frozenBaselines);
+        assert.deepEqual([files[0], stoppedAddition].map(filePath => fs.readFileSync(filePath)), diskBeforeStaleAction);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8')),
+            stateBeforeStaleAction, 'stale Keep must preserve the saved review and recovery records');
+
+        // Issue #45: real Extension Host, stopped Clear followed by
+        // same-process tracker disposal/restoration. The old restart
+        // obligation is future Start work, not a live stopped-state warning.
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const cleared = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+        assert.equal(cleared.isRecording, false);
+        assert.equal(new Map(cleared.coverageGaps).get(root)?.importedCoverageRequired, true);
+        await tracker.dispose();
+        tracker = new DiffTracker(vscode.Uri.file(storage));
+        assert.equal(await tracker.restorePersistedState(), 'restored', tracker.getPersistenceIssue());
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.deepEqual(tracker.getCoverageGaps(), []);
+        const { DiffTreeDataProvider } = require('../../../out/diffTreeView.js');
+        const { StatusBarManager } = require('../../../out/statusBarManager.js');
+        const tree = new DiffTreeDataProvider(tracker);
+        const status = new StatusBarManager(tracker);
+        try {
+            assert.equal((await tree.getChildren()).some(item => item.label === 'Monitoring Coverage Limited'), false);
+            assert.equal(status.statusBarItem.text, '$(circle-outline) Not Recording');
+        } finally {
+            tree.dispose();
+            status.dispose();
+        }
+        assert.equal(tracker.startRecording(), true);
+        await until('fresh baseline after stopped Clear and restore', () => tracker.getBaselineState() === 'ready');
+        assert.equal(tracker.getSubtreeCoverageGaps().length, 0);
+        for (const directory of directories) {
+            assert.equal(tracker.supplementalDirectoryWatchers.get(directory)?.epoch, tracker.sessionEpoch,
+                'the new recording must independently restore each imported native watcher');
+        }
+        tracker.fileWatchers.forEach(watcher => watcher.dispose());
+        tracker.fileWatchers = [];
+        await delay(250);
+        fs.writeFileSync(files[0], 'native edit after stopped Clear reload Start\n');
+        await until('native-only edit after Issue #45 restart', () =>
+            tracker.getTrackedChanges().some(change =>
+                change.filePath === files[0] && change.currentContent === 'native edit after stopped Clear reload Start\n'));
+        // A retired-path decision must not survive an asynchronous refresh.
+        // Use actual filesystem moves and native owners; do not synthesize a
+        // directory notification to make the missing watcher appear covered.
+        // Windows prevents renaming a directory while native watch handles
+        // are open. Release OS handles only for the filesystem move; retain
+        // the imported obligation and require Reset to install real owners.
+        if (process.platform === 'win32') {
+            tracker.disposeFileWatchers();
+            await until('native handles to release the Windows move', () => handles.every(handle => handle.closed));
+        }
+        fs.renameSync(root, source);
+        const refresh = tracker.refreshIgnoreMatchers.bind(tracker);
+        let recreated = false;
+        tracker.refreshIgnoreMatchers = async (...args) => {
+            await refresh(...args);
+            if (!recreated) {
+                recreated = true;
+                fs.renameSync(source, root);
+            }
+        };
+        try { assert.equal(await tracker.resetBaselineToCurrentState(), false); }
+        finally { tracker.refreshIgnoreMatchers = refresh; }
+        assert.equal(recreated, true);
+        assert.equal(tracker.importedCoverageObligations.has(root), true);
+        // Windows updates moved entries' timestamps and delivers rename events
+        // asynchronously. Retry after the production startup timestamp safety
+        // window, rather than treating its correct unknown-before-image refusal
+        // as lost native observation.
+        await delay(tracker.startupTimestampSafetyMarginMs + 250);
+        assert.equal(await tracker.resetBaselineToCurrentState(), true);
+        for (const directory of directories) {
+            assert.equal(tracker.supplementalDirectoryWatchers.get(directory)?.epoch, tracker.sessionEpoch,
+                'retry must acquire each current-epoch imported owner');
+            assert.ok(handles.some(handle => handle.directory === directory && !handle.closed),
+                'retry must retain an open native handle for each imported directory');
+        }
+        assert.deepEqual(tracker.getSubtreeCoverageGaps(), []);
+        assert.deepEqual(tracker.getCoverageGaps(), [], 'retry must establish known file baselines');
+        tracker.fileWatchers.forEach(watcher => watcher.dispose());
+        tracker.fileWatchers = [];
+        await delay(250);
+        fs.writeFileSync(files[1], 'native edit after rejected stale retirement and retry\n');
+        try {
+            await until('native-only nested edit after stale retirement refusal', () =>
+                tracker.getTrackedChanges().some(change => change.filePath === files[1] &&
+                    change.currentContent === 'native edit after rejected stale retirement and retry\n'));
+        } catch (error) {
+            console.error('S4-C retirement retry diagnostics:', JSON.stringify({
+                recording: tracker.isRecording, epoch: tracker.sessionEpoch,
+                externalWatcherEnabled: tracker.externalWatcherEnabled,
+                baseline: tracker.getBaselineState(), gaps: tracker.getSubtreeCoverageGaps(),
+                owners: [...tracker.supplementalDirectoryWatchers].map(([directory, owner]) =>
+                    ({ directory, epoch: owner.epoch, eventRevision: owner.eventRevision })),
+                handles: handles.map(({ directory, closed }) => ({ directory, closed })),
+                changes: tracker.getTrackedChanges().map(change =>
+                    ({ filePath: change.filePath, currentContent: change.currentContent, unavailableReason: change.unavailableReason }))
+            }));
+            throw error;
+        }
+        tracker.stopRecording();
+        console.log('PASS HOST-S4-C imported handoff, stopped review freeze and Clear → Reload → Start retain native observation');
     } finally {
         fs.watch = nativeWatch;
         await tracker.dispose();
-        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        await fs.promises.rm(includedParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         await fs.promises.rm(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         await fs.promises.rm(storage, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }

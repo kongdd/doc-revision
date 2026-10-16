@@ -132,7 +132,7 @@ try {
         // Product shutdown is part of the boundary, not a direct dispose call.
         const state = JSON.parse(readFileSync(evidence.statePath, 'utf8'));
         assert.equal(state.isRecording, evidence.recording);
-        assert.equal(state.version, kind === 'released' ? 3 : 4);
+        assert.equal(state.version, kind === 'released' ? 3 : 5);
         if (kind === 'candidate') {
             assert.equal(state.effectiveMonitoringScope.kind, fixture.legacy ? 'legacyV3' : 'configured');
             if (!fixture.legacy) { assert.equal(state.effectiveMonitoringScope.mode, 'rules'); }
@@ -162,7 +162,7 @@ try {
     assert.equal(results.at(-1).statePath, beforeUpgrade.statePath, 'same extension ID must retain actual workspace storage');
     const upgraded = JSON.parse(readFileSync(beforeUpgrade.statePath, 'utf8'));
     assert.deepEqual(upgraded.fileSnapshots, JSON.parse(originalSession).fileSnapshots,
-        'V3→V4 upgrade must preserve every accepted text before-image');
+        'V3→V5 upgrade must preserve every accepted text before-image');
     assert.equal(upgraded.effectiveMonitoringScope.kind, 'legacyV3', 'schema migration is not user-authorized scope migration');
     revalidate();
     if (finalMode) { verifyFinalEvidence(summary('passed'), artifact); }
