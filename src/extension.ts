@@ -176,7 +176,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 { modal: true },
                 'Discard Saved Session and Rebuild'
             );
-            if (answer !== 'Discard Saved Session and Rebuild' || !await diffTracker.discardRecoveryState()) {
+            if (request !== recordingRequest || answer !== 'Discard Saved Session and Rebuild') { return false; }
+            if (!await diffTracker.discardRecoveryState() || request !== recordingRequest) {
                 return false;
             }
         } else if (!diffTracker.getIsRecording() && diffTracker.getBaselineState() === 'building') {
@@ -185,7 +186,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 { modal: true },
                 'Rebuild Baseline'
             );
-            if (answer !== 'Rebuild Baseline') { return false; }
+            if (request !== recordingRequest || answer !== 'Rebuild Baseline') { return false; }
         }
 
         // A recovery/rebuild confirmation can remain open while Workspace
@@ -1026,6 +1027,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
                 return false;
             }
+            // Confirmation commits the Clear intent. Cancel older Start prechecks
+            // now, not after reset: a later Start owns its own newer request.
+            ++recordingRequest;
             if (!await diffTracker.resetBaselineToCurrentState()) {
                 vscode.window.showWarningMessage('Code Diff Tracker: Clear Diffs did not complete. The review remains unavailable or preserved according to the current baseline state; check persistence and coverage warnings.');
                 return false;
