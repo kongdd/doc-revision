@@ -552,6 +552,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
+            // Stopped reviews must display the captured version on both sides.
+            // Native Review already owns token-bound, read-only snapshots and
+            // the safe Webview fallback for opaque or unknown pending changes.
+            if (!diffTracker.getIsRecording()) {
+                return vscode.commands.executeCommand('diffTracker.nativeReview.openFile', filePath);
+            }
+
             // Show side-by-side diff using VS Code's built-in diff editor
             const currentUri = vscode.Uri.file(filePath);
             const originalUri = currentUri.with({ scheme: 'diff-tracker-original' });
@@ -561,7 +568,7 @@ export async function activate(context: vscode.ExtensionContext) {
             await vscode.commands.executeCommand('vscode.diff',
                 originalUri,
                 currentUri,
-                `Original  ↔  Current: ${fileName}`
+                `Original  ↔  Live File: ${fileName}`
             );
         })
     );

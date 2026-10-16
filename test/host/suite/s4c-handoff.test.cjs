@@ -125,7 +125,7 @@ module.exports = async function s4cHandoffHost(workspace) {
             'restart uncertainty must not be presented as a current runtime coverage gap');
         assert.equal(await tracker.flushPendingPersistence(), true);
         const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
-        assert.equal(saved.version, 4);
+        assert.equal(saved.version, 5);
         assert.equal(new Map(saved.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required', 'saved review must not claim that an OS handle survives restart');
         assert.equal(new Map(saved.coverageGaps).get(root)?.importedCoverageRequired, true);
@@ -173,6 +173,46 @@ module.exports = async function s4cHandoffHost(workspace) {
         assert.equal(stopped.isRecording, false);
         assert.equal(new Map(stopped.coverageGaps).get(root)?.subtree?.reasonCode,
             'imported-coverage-restart-required');
+
+        // Issue #45: real filesystem work after Stop must stay outside the
+        // frozen review, including across same-process tracker restoration.
+        const reviewSnapshot = () => JSON.parse(JSON.stringify(tracker.getTrackedChanges()))
+            .sort((left, right) => left.filePath.localeCompare(right.filePath));
+        const frozenReviews = reviewSnapshot();
+        const frozenBaselines = files.map(filePath => [filePath, tracker.getOriginalContent(filePath)]);
+        assert.equal(frozenReviews.length, files.length);
+        assert.equal(frozenReviews.find(change => change.filePath === files[0])?.currentContent,
+            'native edit after pending restart and Reset\n');
+        const stoppedAddition = path.join(nested, 'created-after-Stop.txt');
+        fs.writeFileSync(files[0], 'unrecorded native edit after Stop\n');
+        fs.writeFileSync(stoppedAddition, 'unrecorded native addition after Stop\n');
+        await delay(250);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'stopped native edits must not refresh the review');
+        await tracker.dispose();
+        tracker = new DiffTracker(vscode.Uri.file(storage));
+        assert.equal(await tracker.restorePersistedState(), 'restored', tracker.getPersistenceIssue());
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'reload must restore exactly the pending Stop-time review');
+        assert.equal(tracker.getOriginalContent(stoppedAddition), undefined,
+            'reload must not discover a file created after Stop');
+        assert.equal(tracker.getTrackedChanges().some(change => change.filePath === stoppedAddition), false);
+        assert.equal(tracker.activeDirectDirectoryWatcherCount(tracker.sessionEpoch), 0);
+        assert.equal(tracker.fileWatchers.length, 0);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const stateBeforeStaleAction = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+        const diskBeforeStaleAction = [files[0], stoppedAddition].map(filePath => fs.readFileSync(filePath));
+        const frozenToken = tracker.getReviewToken(files[0]);
+        assert.ok(frozenToken, 'the restored frozen text remains inspectable');
+        const staleKeep = await tracker.keepAllChangesInFile(files[0], frozenToken);
+        assert.equal(staleKeep.status, 'conflict', JSON.stringify(staleKeep));
+        assert.equal(tracker.getIsRecording(), false);
+        assert.deepEqual(reviewSnapshot(), frozenReviews, 'stale Keep must not refresh a frozen review');
+        assert.deepEqual(tracker.getReviewToken(files[0]), frozenToken);
+        assert.deepEqual(files.map(filePath => [filePath, tracker.getOriginalContent(filePath)]), frozenBaselines);
+        assert.deepEqual([files[0], stoppedAddition].map(filePath => fs.readFileSync(filePath)), diskBeforeStaleAction);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8')),
+            stateBeforeStaleAction, 'stale Keep must preserve the saved review and recovery records');
 
         // Issue #45: real Extension Host, stopped Clear followed by
         // same-process tracker disposal/restoration. The old restart
@@ -274,7 +314,7 @@ module.exports = async function s4cHandoffHost(workspace) {
             throw error;
         }
         tracker.stopRecording();
-        console.log('PASS HOST-S4-C imported handoff and Issue #45 stopped Clear → Reload → Start retain native observation');
+        console.log('PASS HOST-S4-C imported handoff, stopped review freeze and Clear → Reload → Start retain native observation');
     } finally {
         fs.watch = nativeWatch;
         await tracker.dispose();

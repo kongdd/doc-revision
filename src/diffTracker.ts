@@ -309,8 +309,11 @@ export interface SubtreeCoverageDiagnostic {
     reason: string;
 }
 
+type StoppedReviewSnapshot = Omit<FileDiff, 'fileName' | 'originalContent' | 'changes' | 'timestamp'> & { timestamp: number };
+
 interface PersistedTrackerState {
-    version: 4;
+    version: 4 | 5;
+    stoppedReviews?: StoppedReviewSnapshot[];
     /** Parser-only provenance; never copied from JSON or emitted by buildPersistedState. */
     migratedFromV1?: boolean;
     isRecording: boolean;
@@ -705,7 +708,9 @@ export class DiffTracker {
             if (!token || token.filePath !== filePath || !state) {
                 const reason = this.hasDirtyDocument(filePath)
                     ? 'Save or discard editor changes before acknowledging this read-only review'
-                    : 'Read-only review is stale or unavailable; refresh and review again';
+                    : !this.isRecording
+                        ? 'The working file differs from the stopped review. The captured review is unchanged; reconcile the file or explicitly start a new baseline.'
+                        : 'Read-only review is stale or unavailable; refresh and review again';
                 if (token && this.isCurrentEpoch(token.epoch)) { await this.refreshRejectedReview(filePath); }
                 return this.actionResult(filePath, 'conflict', reason);
             }
@@ -745,7 +750,9 @@ export class DiffTracker {
                 const reason = dirty
                     ? 'Save the file before Keep or Revert so the reviewed content matches disk'
                     : this.trackedChanges.get(filePath)?.unavailableReason
-                        ?? 'Review is stale or unavailable; refresh and review again';
+                        ?? (!this.isRecording
+                            ? 'The working file differs from the stopped review. The captured review is unchanged; reconcile the file or explicitly start a new baseline.'
+                            : 'Review is stale or unavailable; refresh and review again');
                 if (token && this.isCurrentEpoch(token.epoch)) { await this.refreshRejectedReview(filePath); }
                 return this.actionResult(filePath, 'conflict', reason);
             }
@@ -758,6 +765,10 @@ export class DiffTracker {
         return task;
     }
     private async refreshRejectedReview(filePath: string): Promise<void> {
+        // Rejection must not turn a stopped review into a fresh capture. The
+        // action reports the stale disk/buffer state while its snapshot stays
+        // available for inspection until an explicit new baseline is started.
+        if (!this.isRecording) { return; }
         const document = vscode.workspace.textDocuments.find(value =>
             value.uri.scheme === 'file' && this.canonicalTrackingPath(value.uri.fsPath) === filePath
         );
@@ -1100,7 +1111,9 @@ export class DiffTracker {
             ? this.configuredSupplementalCoveragePlan(state.effectiveMonitoringScope)
             : undefined;
         const watcherCoverageNeedsS4 = restoreSupplementalPlan?.issue;
-        const incomplete = state.baselineState === 'building' || !rootsMatch || !scopeRootsMatch ||
+        const missingStoppedReview = !state.isRecording && state.stoppedReviews === undefined && !failOnActivity &&
+            (state.fileSnapshots.length > 0 || state.opaqueBaselineFiles.length > 0 || state.unresolvedBaselineFiles.length > 0);
+        const incomplete = missingStoppedReview || state.baselineState === 'building' || !rootsMatch || !scopeRootsMatch ||
             configuredScopeNeedsReconciliation || !!watcherCoverageNeedsS4;
         // Older versions could persist an active session with no folders.
         // Restoration bypasses Start, so enforce the same idle boundary here.
@@ -1139,6 +1152,9 @@ export class DiffTracker {
         this.snapshotInitialized = !incomplete;
         this.baselineBuilding = incomplete;
         this.workspaceContextChanged = !rootsMatch || !scopeRootsMatch;
+        // Install the frozen projection before any restore-time save barrier.
+        // Otherwise a policy/migration save could persist an empty pending set.
+        if (!state.isRecording && !failOnActivity) { this.restoreStoppedReviews(state.stoppedReviews ?? []); }
 
         // Cover ignore discovery too; restore callbacks queue until reconciliation.
         if (observeForReconciliation) {
@@ -1174,7 +1190,8 @@ export class DiffTracker {
             if (!this.isCurrentEpoch(epoch)) { return 'blocked'; }
             this.commitSupplementalCoverageTargets(restoreSupplementalPlan.targets);
         }
-        const migratedDirectorySentinels = this.normalizeRestoredDirectorySentinels();
+        const migratedDirectorySentinels = (state.isRecording || failOnActivity || state.stoppedReviews === undefined)
+            ? this.normalizeRestoredDirectorySentinels() : false;
         if (migratedDirectorySentinels && !await this.flushPersistState()) {
             this.recoveryBlocked = true;
             this.isRecording = false;
@@ -1216,7 +1233,9 @@ export class DiffTracker {
         } else {
             this.externalWatcherEnabled = false;
         }
-        await this.rebuildTrackedChangesFromSnapshots();
+        if (state.isRecording || failOnActivity) {
+            await this.rebuildTrackedChangesFromSnapshots();
+        }
         if (!this.isCurrentEpoch(epoch)) { return 'blocked'; }
         this.reconcilePendingScopeSuspendedPaths();
         while (this.restoreEvents.size > 0) {
@@ -1238,7 +1257,9 @@ export class DiffTracker {
         }
         if (!this.isCurrentEpoch(epoch)) { return 'blocked'; }
         if (incomplete) {
-            this.persistenceIssue = watcherCoverageNeedsS4
+            this.persistenceIssue = missingStoppedReview
+                ? 'This older stopped session did not save its pending review snapshots. Baselines are preserved, but post-Stop edits were not imported. Start or rebuild explicitly to capture a new baseline.'
+                : watcherCoverageNeedsS4
                 ? `Effective monitoring scope requires supplemental coverage at ${watcherCoverageNeedsS4}; review is paused until the scope is narrowed or S4-B coverage exists, then the baseline is rebuilt.`
                 : state.baselineState === 'building'
                     ? 'Recovered a partial baseline scan in paused mode; rebuild the baseline before review actions.'
@@ -3200,6 +3221,51 @@ export class DiffTracker {
         return sortedLeft.every((value, index) => value === sortedRight[index]);
     }
 
+    private captureStoppedReviews(): StoppedReviewSnapshot[] {
+        const snapshots: StoppedReviewSnapshot[] = [];
+        for (const change of this.trackedChanges.values()) {
+            // Clear and acceptance persist candidate baselines before updating
+            // UI projections. Do not serialize reviews whose evidence retired.
+            if (!this.fileSnapshots.has(change.filePath) && !this.opaqueBaselineFiles.has(change.filePath) &&
+                !this.unresolvedBaselineFiles.has(change.filePath) && !this.largeFileReminders.has(change.filePath)) { continue; }
+            const baseline = this.fileSnapshots.get(change.filePath);
+            if (change.reviewKind === 'text' && baseline !== undefined && !change.unavailableReason) {
+                const before = this.toTextLineModel(baseline).lines;
+                const after = this.toTextLineModel(change.currentContent).lines;
+                if (this.baselineExistingFiles.has(change.filePath) === !change.isDeleted &&
+                    before.length === after.length && before.every((line, index) => line === after[index])) { continue; }
+            }
+            const opaque = this.opaqueBaselineFiles.get(change.filePath);
+            if (change.reviewKind === 'opaque' && opaque && change.currentExists &&
+                opaque.fingerprint && opaque.fingerprint === change.currentFingerprint && opaque.size === change.currentSize) { continue; }
+            const { fileName: _name, originalContent: _original, changes: _changes, timestamp, ...review } = change;
+            snapshots.push({ ...review,
+                baselineExists: change.reviewKind === 'unknown' ? review.baselineExists
+                    : opaque ? true : this.baselineExistingFiles.has(change.filePath),
+                baselineSize: change.reviewKind === 'opaque' ? opaque?.size ??
+                    (baseline !== undefined ? Buffer.byteLength(baseline, 'utf8') : undefined) : review.baselineSize,
+                baselineFingerprint: change.reviewKind === 'opaque' ? opaque?.fingerprint ??
+                    (baseline !== undefined ? createHash('sha256').update(baseline, 'utf8').digest('hex') : undefined) : review.baselineFingerprint,
+                timestamp: timestamp.getTime() });
+        }
+        return snapshots.sort((left, right) => left.filePath.localeCompare(right.filePath));
+    }
+
+    private restoreStoppedReviews(reviews: readonly StoppedReviewSnapshot[]): void {
+        for (const review of reviews) {
+            const originalContent = this.fileSnapshots.get(review.filePath) ?? '';
+            const normalized = (content: string): string => this.serializeTextModel(
+                { ...this.toTextLineModel(content), dominantEol: '\n' }, '\n'
+            );
+            const change: FileDiff = {
+                ...review, fileName: displayFileName(review.filePath), originalContent,
+                changes: Diff.diffLines(normalized(originalContent), normalized(review.currentContent)), timestamp: new Date(review.timestamp)
+            };
+            this.setTrackedChange(review.filePath, change);
+            if (change.reviewKind === 'text') { this.calculateLineChanges(review.filePath); }
+        }
+    }
+
     private buildPersistedState(): PersistedTrackerState | undefined {
         if (!this.storageUri) {
             return undefined;
@@ -3219,7 +3285,8 @@ export class DiffTracker {
         }
 
         return {
-            version: 4,
+            version: 5,
+            stoppedReviews: this.isRecording ? undefined : this.captureStoppedReviews(),
             isRecording: this.isRecording,
             baselineState: this.baselineBuilding || !this.snapshotInitialized ? 'building' : 'ready',
             scanCoverage: this.scanCoverage,
@@ -3497,7 +3564,7 @@ export class DiffTracker {
         return loaded.kind === 'primary' || loaded.kind === 'recovered' ? loaded.state : undefined;
     }
 
-    private async readPersistedCandidate(uri: vscode.Uri, requireV4 = false): Promise<
+    private async readPersistedCandidate(uri: vscode.Uri, requireScopedState = false): Promise<
         { kind: 'absent' } | { kind: 'invalid'; reason: string } | { kind: 'valid'; state: PersistedTrackerState; digest: string }
     > {
         try {
@@ -3507,8 +3574,8 @@ export class DiffTracker {
             }
             const raw = new TextDecoder('utf-8', { fatal: true }).decode(payload);
             const parsed: unknown = JSON.parse(raw);
-            if (requireV4 && (!parsed || typeof parsed !== 'object' || (parsed as { version?: unknown }).version !== 4)) {
-                return { kind: 'invalid', reason: 'Archive restore requires a complete Session V4 file' };
+            if (requireScopedState && (!parsed || typeof parsed !== 'object' || !([4, 5] as unknown[]).includes((parsed as { version?: unknown }).version))) {
+                return { kind: 'invalid', reason: 'Archive restore requires a complete Session V4 or V5 file' };
             }
             const state = this.parsePersistedState(parsed);
             return state ? { kind: 'valid', state, digest: createHash('sha256').update(payload).digest('hex') } : { kind: 'invalid', reason: 'schema or invariant validation failed' };
@@ -3561,9 +3628,10 @@ export class DiffTracker {
             largeFileReminders?: unknown;
             revertHistory?: unknown;
             gitContexts?: unknown;
+            stoppedReviews?: unknown;
         };
 
-        if ((candidate.version !== 1 && candidate.version !== 2 && candidate.version !== 3 && candidate.version !== 4) ||
+        if ((candidate.version !== 1 && candidate.version !== 2 && candidate.version !== 3 && candidate.version !== 4 && candidate.version !== 5) ||
             typeof candidate.isRecording !== 'boolean') {
             return undefined;
         }
@@ -3699,7 +3767,7 @@ export class DiffTracker {
         const gitContexts = this.parseGitContexts(candidate.version === 1 ? [] : (candidate.gitContexts ?? []), normalizedRoots);
         if (!gitContexts) { return undefined; }
 
-        const effectiveMonitoringScope = candidate.version === 4
+        const effectiveMonitoringScope = (candidate.version === 4 || candidate.version === 5)
             ? parseEffectiveMonitoringScope(candidate.effectiveMonitoringScope)
             : this.createLegacyEffectiveScopeForRoots(normalizedRoots);
         if (!effectiveMonitoringScope) { return undefined; }
@@ -3715,10 +3783,10 @@ export class DiffTracker {
             }
             return values;
         };
-        const retainedReviewPaths = candidate.version === 4 ? parsePathList(candidate.retainedReviewPaths) : [];
+        const retainedReviewPaths = (candidate.version === 4 || candidate.version === 5) ? parsePathList(candidate.retainedReviewPaths) : [];
         if (!retainedReviewPaths) { return undefined; }
 
-        const rawLegacyWatchExcludeByRoot = candidate.version === 4
+        const rawLegacyWatchExcludeByRoot = (candidate.version === 4 || candidate.version === 5)
             ? (candidate.legacyWatchExcludeByRoot ?? [])
             : [];
         if (!Array.isArray(rawLegacyWatchExcludeByRoot) ||
@@ -3745,7 +3813,7 @@ export class DiffTracker {
             legacyWatchExcludeByRoot.push([rootUri, patterns]);
         }
 
-        const rawCoverageGaps = candidate.version === 4 ? candidate.coverageGaps : [];
+        const rawCoverageGaps = (candidate.version === 4 || candidate.version === 5) ? candidate.coverageGaps : [];
         if (!Array.isArray(rawCoverageGaps) || rawCoverageGaps.length > this.maxPersistedSnapshots) { return undefined; }
         const parseCoverageGapEvidence = (rawEvidence: unknown, expectedKind: 'file' | 'subtree'): CoverageGapEvidence | undefined => {
             if (!rawEvidence || typeof rawEvidence !== 'object') { return undefined; }
@@ -3799,7 +3867,7 @@ export class DiffTracker {
             // A whole-scope Recheck sentinel describes subtree uncertainty,
             // never a root file or imported-directory ownership. Keep every
             // other persisted path subject to the strict descendant boundary.
-            const rootRecheckMarker = candidate.version === 4 && effectiveMonitoringScope.kind === 'configured' &&
+            const rootRecheckMarker = (candidate.version === 4 || candidate.version === 5) && effectiveMonitoringScope.kind === 'configured' &&
                 normalizedRoots.includes(filePath) && !record.file && !record.importedCoverageRequired &&
                 record.subtree?.reasonCode === 'coverage-recheck-incomplete';
             if (!isWithinRoot(filePath) && !rootRecheckMarker) { return undefined; }
@@ -3807,8 +3875,64 @@ export class DiffTracker {
             coverageGaps.push([filePath, record]);
         }
 
+        let stoppedReviews: StoppedReviewSnapshot[] | undefined;
+        if (candidate.stoppedReviews !== undefined) {
+            const reviewCapacity = new Set([...snapshotPaths, ...opaquePaths, ...unresolvedPaths, ...reminderPaths]).size;
+            if (candidate.version !== 5 || candidate.isRecording || !Array.isArray(candidate.stoppedReviews) ||
+                candidate.stoppedReviews.length > reviewCapacity) { return undefined; }
+            stoppedReviews = [];
+            const paths = new Set<string>();
+            const reminderStates = new Map(largeFileReminders);
+            for (const rawReview of candidate.stoppedReviews) {
+                if (!rawReview || typeof rawReview !== 'object') { return undefined; }
+                const review = rawReview as StoppedReviewSnapshot;
+                if (typeof review.filePath !== 'string' || !path.isAbsolute(review.filePath) ||
+                    !isWithinRoot(review.filePath) || paths.has(review.filePath) ||
+                    (!snapshotPaths.has(review.filePath) && !opaquePaths.has(review.filePath) &&
+                        !unresolvedPaths.has(review.filePath) && !reminderPaths.has(review.filePath)) ||
+                    typeof review.currentContent !== 'string' || typeof review.isDeleted !== 'boolean' ||
+                    !['text', 'opaque', 'unknown'].includes(review.reviewKind) ||
+                    !Number.isFinite(review.timestamp) || !Number.isFinite(new Date(review.timestamp).getTime())) { return undefined; }
+                if (review.reviewKind === 'text' && !snapshotPaths.has(review.filePath)) { return undefined; }
+                if (review.reviewKind === 'opaque' && !snapshotPaths.has(review.filePath) && !opaquePaths.has(review.filePath) &&
+                    (!reminderPaths.has(review.filePath) || !review.largeFileReminder)) { return undefined; }
+                for (const field of ['reviewReason', 'unavailableReason', 'sourceNote'] as const) {
+                    if (review[field] !== undefined && (typeof review[field] !== 'string' || review[field]!.length > 4000)) { return undefined; }
+                }
+                for (const field of ['baselineExists', 'currentExists'] as const) {
+                    if (review[field] !== undefined && typeof review[field] !== 'boolean') { return undefined; }
+                }
+                for (const field of ['baselineSize', 'currentSize'] as const) {
+                    if (review[field] !== undefined && (!Number.isSafeInteger(review[field]) || review[field]! < 0)) { return undefined; }
+                }
+                for (const field of ['baselineFingerprint', 'currentFingerprint'] as const) {
+                    if (review[field] !== undefined && (typeof review[field] !== 'string' || !/^[a-f0-9]{64}$/.test(review[field]!))) { return undefined; }
+                }
+                if (review.currentExists !== undefined && review.currentExists === review.isDeleted) { return undefined; }
+                if (review.largeFileReminder !== undefined && (!review.largeFileReminder ||
+                    typeof review.largeFileReminder.pending !== 'boolean' || typeof review.largeFileReminder.retainedReview !== 'boolean' ||
+                    typeof review.largeFileReminder.currentExists !== 'boolean' ||
+                    (review.largeFileReminder.currentSize !== undefined &&
+                        (!Number.isSafeInteger(review.largeFileReminder.currentSize) || review.largeFileReminder.currentSize < 0)))) { return undefined; }
+                const reminder = reminderStates.get(review.filePath);
+                if (review.largeFileReminder && (!reminder ||
+                    review.largeFileReminder.pending !== !this.sameLargeObservation(reminder.observed, reminder.acknowledged) ||
+                    review.largeFileReminder.retainedReview !== reminder.retainedReview ||
+                    review.largeFileReminder.currentExists !== reminder.observed.exists ||
+                    review.largeFileReminder.currentSize !== reminder.observed.size)) { return undefined; }
+                const { filePath, currentContent, isDeleted, reviewKind, reviewReason, unavailableReason, sourceNote,
+                    baselineExists, currentExists, baselineSize, currentSize, baselineFingerprint, currentFingerprint,
+                    largeFileReminder, timestamp } = review;
+                stoppedReviews.push({ filePath, currentContent, isDeleted, reviewKind, reviewReason, unavailableReason, sourceNote,
+                    baselineExists, currentExists, baselineSize, currentSize, baselineFingerprint, currentFingerprint,
+                    largeFileReminder, timestamp });
+                paths.add(filePath);
+            }
+        } else if (candidate.version === 5 && !candidate.isRecording) { return undefined; }
+
         return {
-            version: 4,
+            version: candidate.version === 5 ? 5 : 4,
+            stoppedReviews,
             isRecording: candidate.isRecording,
             migratedFromV1: candidate.version === 1,
             baselineState,
@@ -6018,7 +6142,7 @@ export class DiffTracker {
             this.processDocumentChange(doc);
         }
         if (!this.activeWriteFiles.has(this.canonicalTrackingPath(doc.uri.fsPath)) && this.pendingWriteFiles.delete(this.canonicalTrackingPath(doc.uri.fsPath))) {
-            void this.readFileAndUpdate(doc.uri.fsPath, doc.uri);
+            if (this.isRecording) { void this.readFileAndUpdate(doc.uri.fsPath, doc.uri); }
         }
     }
 
@@ -6289,11 +6413,11 @@ export class DiffTracker {
         this.pruneIgnoredImportedDirectoryWatchers();
         await this.resumeImportedDirectoryWatchers(epoch, version);
         if (!this.isCurrentEpoch(epoch) || version !== this.ignoreRefreshVersion) { return; }
-        this.pruneIgnoredTrackedChanges();
+        if (this.isRecording || this.restoringEpoch === undefined || this.archiveRestoreTask) { this.pruneIgnoredTrackedChanges(); }
         // Identity can recover without any rule text/fingerprint changing.
         // Reconcile only already-retained review resources, never discover new
         // paths or bypass pending explicit exclusions and hard boundaries.
-        if (!this.baselineTransaction && this.restoringEpoch === undefined &&
+        if (this.isRecording && !this.baselineTransaction && this.restoringEpoch === undefined &&
             !this.baselineBuilding && this.snapshotInitialized) {
             for (const change of [...this.trackedChanges.values()]) {
                 if (change.unavailableReason !== this.rootIdentityUnavailableReason) { continue; }
@@ -8116,6 +8240,8 @@ export class DiffTracker {
                 return this.actionResult(filePath, 'conflict', 'Reminder or editor changed; refresh before marking it as read');
             }
             const previous = this.largeFileReminders.get(filePath)!;
+            const approvedChange = this.trackedChanges.get(filePath);
+            const stopped = !this.isRecording;
             const matchesDisk = (): boolean => {
                 try {
                     const stat = fs.statSync(filePath);
@@ -8123,7 +8249,7 @@ export class DiffTracker {
                 } catch (error) { return this.isFileNotFound(error) && !previous.observed.exists; }
             };
             if (!matchesDisk()) {
-                await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath));
+                if (this.isRecording) { await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath)); }
                 return this.actionResult(filePath, 'conflict', 'File existence or size changed; review the newer reminder');
             }
             const recovery = this.captureBaselineAcceptanceRecovery(!!this.storageUri);
@@ -8133,13 +8259,15 @@ export class DiffTracker {
                 const latest = this.largeFileReminders.get(filePath) ?? previous;
                 this.largeFileReminders.set(filePath, { ...latest, acknowledged: previous.acknowledged });
                 this.baselineBuilding = building; this.snapshotInitialized = initialized;
-                this.publishLargeFileReminder(filePath);
+                if (stopped) { this.restoreFrozenActionReview(filePath, approvedChange); }
+                else { this.publishLargeFileReminder(filePath); }
             });
             transaction.baselineRecovery = recovery;
             transaction.valid = () => this.isCurrentEpoch(token.epoch) && validTarget() &&
                 this.largeFileReminders.get(filePath) === candidate;
             transaction.commitValid = matchesDisk;
             this.largeFileReminders.set(filePath, candidate);
+            if (stopped) { this.publishLargeFileReminder(filePath); }
             if (!await this.commitAcknowledgeTransaction(filePath, token.epoch, transaction)) {
                 return this.actionResult(filePath, 'failed', 'Reminder could not be saved; the earlier reminder and review evidence are preserved');
             }
@@ -9651,6 +9779,22 @@ export class DiffTracker {
         });
     }
 
+    private restoreFrozenActionReview(filePath: string, change: FileDiff | undefined): void {
+        if (change) { this.setTrackedChange(filePath, change); }
+        else { this.deleteTrackedChange(filePath); }
+        this.lineChanges.delete(filePath);
+        this.markLineChangesUpdated(filePath);
+        this.inlineViews.delete(filePath);
+        if (change?.reviewKind === 'text' && !change.unavailableReason && !change.largeFileReminder) {
+            this.calculateLineChanges(filePath);
+        }
+        this.emitTrackChangesEvent({
+            changedFiles: change ? [filePath] : [],
+            removedFiles: change ? [] : [filePath],
+            baselineChanged: true
+        });
+    }
+
     private validateActionReadiness(): string | undefined {
         if (this.archiveRestoreTask) { return 'An archived review restore is in progress; review actions are paused'; }
         if (this.restoringEpoch !== undefined) { return 'Session restoration is still reconciling changes; review is paused'; }
@@ -10726,6 +10870,7 @@ export class DiffTracker {
     ): BaselineTransaction {
         const recovery = this.captureBaselineAcceptanceRecovery(!!this.storageUri);
         const approvedChange = this.trackedChanges.get(filePath);
+        const stopped = !this.isRecording;
         const previous = {
             snapshotPresent: this.fileSnapshots.has(filePath),
             snapshot: this.fileSnapshots.get(filePath),
@@ -10755,6 +10900,7 @@ export class DiffTracker {
             this.revertHistory = previous.revertHistory;
             this.baselineBuilding = previous.baselineBuilding;
             this.snapshotInitialized = previous.snapshotInitialized;
+            if (stopped) { this.restoreFrozenActionReview(filePath, approvedChange); }
         });
         transaction.baselineRecovery = recovery;
         // Reconciliation against the candidate can clear its pending projection.
@@ -10859,6 +11005,15 @@ export class DiffTracker {
     private async commitAcknowledgeTransaction(filePath: string, epoch: number, transaction: BaselineTransaction): Promise<boolean> {
         let committed = false;
         try {
+            // The candidate baseline already contains the approved identity.
+            // Publish its stopped pending projection in the same durable write,
+            // including opaque-to-text/deletion and explicit Unknown reset.
+            // beginAcknowledgeTransaction restores the exact prior projection if
+            // this candidate fails. Metadata-only reminders have their own
+            // acknowledged/retained-review state and are not cleared here.
+            if (!this.isRecording && !this.trackedChanges.get(filePath)?.largeFileReminder) {
+                this.restoreFrozenActionReview(filePath, undefined);
+            }
             if (!await this.prepareBaselineAcceptancePersistence(transaction)) { return false; }
             const completed = await this.completeBaseline(epoch, transaction);
             committed = !!transaction.durablyCommitted || (completed &&
@@ -10873,7 +11028,7 @@ export class DiffTracker {
             const invalidTarget = this.isCurrentEpoch(epoch) && transaction.valid && !transaction.valid();
             this.endBaselineTransaction(transaction, committed);
             if (!committed) { await this.rollbackBaselineAcceptancePersistence(transaction, epoch, !!invalidTarget); }
-            if (!committed && this.isCurrentEpoch(epoch)) {
+            if (!committed && this.isCurrentEpoch(epoch) && this.isRecording) {
                 await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath));
             }
         }
@@ -10948,7 +11103,8 @@ export class DiffTracker {
         // merely clears the old review. Notify original-content providers
         // explicitly so already-open diff editors cannot retain the old baseline.
         this.emitTrackChangesEvent({ changedFiles: [filePath], baselineChanged: true });
-        await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath));
+        if (this.isRecording) { await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath)); }
+        else { this.clearFileReview(filePath, true); this.schedulePersistState(); }
         return this.actionResult(filePath, 'success');
     }
 
@@ -11008,7 +11164,7 @@ export class DiffTracker {
         }
         const first = await this.readCurrentFileState(filePath);
         if (this.isCurrentEpoch(epoch) && this.isLargeFileState(first)) {
-            this.reconcileLargeFileReminder(filePath, first);
+            if (this.isRecording) { this.reconcileLargeFileReminder(filePath, first); }
             return this.actionResult(filePath, 'needsAttention', 'File exceeds 64 MiB; acknowledge its metadata reminder instead. Unknown is preserved');
         }
         const beforeIdentity = this.stableUnknownResetIdentity(first);
@@ -11020,7 +11176,7 @@ export class DiffTracker {
         }
         const second = await this.readCurrentFileState(filePath);
         if (this.isCurrentEpoch(epoch) && this.isLargeFileState(second)) {
-            this.reconcileLargeFileReminder(filePath, second);
+            if (this.isRecording) { this.reconcileLargeFileReminder(filePath, second); }
             return this.actionResult(filePath, 'needsAttention', 'File exceeds 64 MiB; acknowledge its metadata reminder instead. Unknown is preserved');
         }
         if (this.stableUnknownResetIdentity(second) !== beforeIdentity || !this.matchesUnknownReview(token)) {
@@ -11047,10 +11203,11 @@ export class DiffTracker {
         if (!this.isCurrentEpoch(epoch)) {
             return this.actionResult(filePath, 'success', 'New baseline was committed before the session changed');
         }
-        // A successful replacement is not an acknowledgement of the old state.
-        // Reread after publication so intervening edits remain pending.
+        // Recording resumes observation after the explicit replacement. A
+        // stopped session clears only the approved review at this boundary.
         this.emitTrackChangesEvent({ changedFiles: [filePath], baselineChanged: true });
-        await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath));
+        if (this.isRecording) { await this.readFileAndUpdate(filePath, vscode.Uri.file(filePath)); }
+        else { this.clearFileReview(filePath, true); this.schedulePersistState(); }
         return this.actionResult(filePath, 'success');
     }
 
@@ -11379,7 +11536,7 @@ export class DiffTracker {
                 (savedState.kind !== 'text' || savedState.content !== item.before.content || document.isDirty))) {
                 if (this.isCurrentEpoch(epoch)) {
                     this.pendingWriteFiles.delete(item.filePath);
-                    this.updateTrackedDiff(item.filePath, document.getText(), { currentExists: true });
+                    if (this.isRecording) { this.updateTrackedDiff(item.filePath, document.getText(), { currentExists: true }); }
                 }
                 return this.actionResult(item.filePath, 'conflict', 'Recovery contents changed during save; recovery retained', true);
             }
@@ -11556,7 +11713,7 @@ export class DiffTracker {
             return this.actionResult(filePath, 'conflict', 'Review changed before revert');
         }
         if (state.kind === 'unavailable') {
-            this.markFileUnavailable(filePath, state.reason);
+            if (this.isRecording) { this.markFileUnavailable(filePath, state.reason); }
             return this.actionResult(filePath, 'failed', state.reason);
         }
         if (options?.deleteIfMissingInBaseline) {
@@ -11606,7 +11763,7 @@ export class DiffTracker {
             const afterSaveError = this.validateRevertTarget(filePath);
             if (afterSaveError) { return this.actionResult(filePath, 'conflict', afterSaveError, true); }
             if (!saved) {
-                this.markFileUnavailable(filePath, 'Editor buffer changed but saving failed; pending review retained');
+                if (this.isRecording) { this.markFileUnavailable(filePath, 'Editor buffer changed but saving failed; pending review retained'); }
                 return this.actionResult(filePath, 'failed', 'Editor buffer changed but saving failed; pending review retained', true);
             }
             bufferChanged = false;
@@ -11619,7 +11776,7 @@ export class DiffTracker {
             const reason = bufferChanged
                 ? 'Editor buffer changed but saving failed; pending review retained'
                 : 'Revert failed (open, edit or provider error); review retained';
-            if (bufferChanged) { this.markFileUnavailable(filePath, reason); }
+            if (bufferChanged && this.isRecording) { this.markFileUnavailable(filePath, reason); }
             return this.actionResult(filePath, 'failed', reason, bufferChanged);
         } finally {
             if (this.isCurrentEpoch(epoch)) {
@@ -11824,14 +11981,14 @@ export class DiffTracker {
                     await this.removeRevertRecord(recoveryRecord);
                     recoveryRecord = undefined;
                 } else {
-                    this.markFileUnavailable(filePath, 'Review changed after the editor buffer was modified; recovery retained');
+                    if (this.isRecording) { this.markFileUnavailable(filePath, 'Review changed after the editor buffer was modified; recovery retained'); }
                 }
                 return this.actionResult(filePath, 'conflict', afterEditError ?? 'Session or review changed during block edit', bufferChanged);
             }
             if (!success) {
                 const bufferChanged = doc.getText() !== beforeText;
                 if (!bufferChanged) { this.pendingWriteFiles.delete(filePath); }
-                else { this.markFileUnavailable(filePath, 'Block edit failed after changing the editor buffer; review retained'); }
+                else if (this.isRecording) { this.markFileUnavailable(filePath, 'Block edit failed after changing the editor buffer; review retained'); }
                 if (!bufferChanged) {
                     await this.removeRevertRecord(recoveryRecord);
                     recoveryRecord = undefined;
@@ -11841,7 +11998,7 @@ export class DiffTracker {
             this.pendingWriteFiles.delete(filePath);
             if (doc.getText() !== nextText) {
                 const bufferChanged = doc.getText() !== beforeText;
-                this.updateTrackedDiff(filePath, doc.getText());
+                if (this.isRecording) { this.updateTrackedDiff(filePath, doc.getText()); }
                 if (!bufferChanged) {
                     await this.removeRevertRecord(recoveryRecord);
                     recoveryRecord = undefined;
@@ -11859,7 +12016,7 @@ export class DiffTracker {
             if (!bufferChanged) { this.pendingWriteFiles.delete(filePath); }
             else {
                 this.pendingWriteFiles.add(filePath);
-                this.markFileUnavailable(filePath, 'Block edit failed after changing the editor buffer; review retained');
+                if (this.isRecording) { this.markFileUnavailable(filePath, 'Block edit failed after changing the editor buffer; review retained'); }
             }
             if (recoveryRecord && !bufferChanged) {
                 await this.removeRevertRecord(recoveryRecord);
@@ -11885,6 +12042,8 @@ export class DiffTracker {
     }
 
     private beginKeepTransaction(filePath: string, review: ReviewToken, signature: string): BaselineTransaction {
+        const frozenReview = !this.isRecording ? this.trackedChanges.get(filePath) : undefined;
+        const stopped = !this.isRecording;
         const needsRecovery = !!(this.storageUri && this.gitContextProvider && this.getRepositoryOwner(filePath));
         const recovery = this.captureBaselineAcceptanceRecovery(needsRecovery);
         const content = this.fileSnapshots.get(filePath)!;
@@ -11905,8 +12064,11 @@ export class DiffTracker {
             this.revertHistory = history;
             this.baselineBuilding = building;
             this.snapshotInitialized = initialized;
-            this.updateTrackedDiff(filePath, currentContent, { baselineChanged: true, currentExists });
-            if (latest?.unavailableReason) { this.markFileUnavailable(filePath, latest.unavailableReason); }
+            if (stopped) { this.restoreFrozenActionReview(filePath, frozenReview); }
+            else {
+                this.updateTrackedDiff(filePath, currentContent, { baselineChanged: true, currentExists });
+                if (latest?.unavailableReason) { this.markFileUnavailable(filePath, latest.unavailableReason); }
+            }
         });
         transaction.baselineRecovery = recovery;
         const branchTolerant = this.captureKeepGitContext(filePath).crossBranch || !!this.getGitPauseReason(filePath);
@@ -11916,7 +12078,7 @@ export class DiffTracker {
             // after the resource has crossed into metadata-only monitoring.
             try { if (fs.statSync(filePath).size > this.maxFullContentBytes) { return false; } }
             catch (error) { if (!this.isFileNotFound(error)) { return false; } }
-            return !branchTolerant || this.keepReviewStillCurrent(review, signature, true);
+            return (!branchTolerant && !stopped) || this.keepReviewStillCurrent(review, signature, true);
         };
         // Remove only this path's obsolete recovery items, retaining other batch members.
         this.revertHistory = history.map(record => ({ ...record, items: record.items.filter(item => item.filePath !== filePath) }))
@@ -12027,7 +12189,7 @@ export class DiffTracker {
             const invalidTarget = this.isCurrentEpoch(epoch) && transaction.valid && !transaction.valid();
             this.endBaselineTransaction(transaction, committed);
             if (!committed) { await this.rollbackBaselineAcceptancePersistence(transaction, epoch, !!invalidTarget); }
-            if (!committed && this.isCurrentEpoch(epoch) && !this.keepHasUnverifiedEvidence(filePath)) {
+            if (!committed && this.isCurrentEpoch(epoch) && this.isRecording && !this.keepHasUnverifiedEvidence(filePath)) {
                 // Also cover edits with no delivered callback. A dirty buffer
                 // remains unavailable, with its latest contents visible.
                 const state = await this.readCurrentFileState(filePath);
@@ -12143,6 +12305,13 @@ export class DiffTracker {
         // Persistence awaits may admit newer editor/disk changes; never clear them
         // using the content reviewed before the write began.
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
+        if (!this.isRecording) {
+            // Only the selected block was accepted. Re-project the remaining
+            // frozen bytes against that new baseline, without observing disk.
+            this.updateTrackedDiff(filePath, currentText, { baselineChanged: true, currentExists: true });
+            this.schedulePersistState();
+            return this.actionResult(filePath, 'success');
+        }
         if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         const afterKeep = await this.readCurrentFileState(filePath);
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
@@ -12176,12 +12345,12 @@ export class DiffTracker {
         const state = await this.readCurrentFileState(filePath);
         if (!this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Review changed during Keep'); }
         if (state.kind === 'unavailable') {
-            this.markFileUnavailable(filePath, state.reason);
+            if (this.isRecording) { this.markFileUnavailable(filePath, state.reason); }
             return this.actionResult(filePath, 'conflict', state.reason);
         }
         const currentContent = state.kind === 'text' ? state.content : '';
         if (currentContent !== tracked.currentContent || (state.kind === 'missing') !== tracked.isDeleted) {
-            this.updateTrackedDiff(filePath, currentContent, { currentExists: state.kind === 'text' });
+            if (this.isRecording) { this.updateTrackedDiff(filePath, currentContent, { currentExists: state.kind === 'text' }); }
             return this.actionResult(filePath, 'conflict', 'File changed since review; review again');
         }
         const finalTargetError = this.validateKeepTarget(filePath, signature);
@@ -12199,6 +12368,11 @@ export class DiffTracker {
         }
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }
         this.pendingWriteFiles.delete(filePath);
+        if (!this.isRecording) {
+            this.clearFileReview(filePath, true);
+            this.schedulePersistState();
+            return this.actionResult(filePath, 'success');
+        }
         if (this.keepHasUnverifiedEvidence(filePath)) { return this.actionResult(filePath, 'success', 'Keep saved; newer unverified review remains pending'); }
         const afterKeep = await this.readCurrentFileState(filePath);
         if (!this.isCurrentEpoch(keepEpoch)) { return this.actionResult(filePath, 'success', 'Keep saved before the session changed'); }

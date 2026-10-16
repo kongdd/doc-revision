@@ -319,6 +319,40 @@ await test('Issue #39 tree and status bar consume the same active subtree gaps a
     status.dispose();
 });
 
+for (const coverageLimited of [false, true]) {
+    await test(`stopped status bar explains existing Live File diffs and the snapshot route (coverage limited=${coverageLimited})`, () => {
+        const h = harness(null);
+        const item = { show() {}, dispose() {} };
+        h.vscode.StatusBarAlignment = { Right: 2 };
+        h.vscode.ThemeColor = class { constructor(id) { this.id = id; } };
+        h.vscode.window.createStatusBarItem = () => item;
+        let recording = true;
+        const listeners = [];
+        h.tracker.getIsRecording = () => recording;
+        h.tracker.onDidChangeRecordingState = listener => { listeners.push(listener); return { dispose() {} }; };
+        h.tracker.onDidChangeBaselineState = () => ({ dispose() {} });
+        if (coverageLimited) { h.state.subtreeCoverageGaps = [{ targetPath: '/workspace/missing' }]; }
+        const status = new (h.load('statusBarManager.ts').StatusBarManager)(h.tracker);
+        assert.doesNotMatch(item.tooltip, /Recording stopped|Live File/);
+        recording = false;
+        for (const listener of listeners) { listener(recording); }
+        assert.match(item.tooltip, /Captured changes are preserved/);
+        assert.match(item.tooltip, /Already-open Live File diffs still show the working file, including later edits/);
+        assert.match(item.tooltip, /right-click a changed file in Change Recording and choose Open Native Review Snapshot/);
+        assert.equal(item.command, coverageLimited ? 'diffTracker.manageMonitoringScope' : 'diffTracker.toggleRecording');
+        const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        assert.equal(manifest.contributes.commands.find(command => command.command === 'diffTracker.nativeReview.openFile').title,
+            'Open Native Review Snapshot', 'the instruction names an existing command exactly');
+        assert.ok(manifest.contributes.menus['view/item/context'].some(entry =>
+            entry.command === 'diffTracker.nativeReview.openFile' && entry.when.includes('changedFile')));
+        recording = true;
+        for (const listener of listeners) { listener(recording); }
+        assert.doesNotMatch(item.tooltip, /Recording stopped|Live File/, 'Start clears the stopped-only explanation');
+        assert.deepEqual(h.commands, [], 'the explanation neither closes editors nor opens a modal');
+        status.dispose();
+    });
+}
+
 // VS Code TreeMenus separates group `inline` (primary/hover) from all other
 // groups (secondary/right-click). One contribution does not provide both.
 // https://github.com/microsoft/vscode/blob/1.80.2/src/vs/workbench/browser/parts/views/treeView.ts#L1500-L1522
@@ -1389,7 +1423,7 @@ function commandHarness(options={}) {
         startResult:true,starts:0,baselineGitContexts:[],recordingContexts:[],gitReady:true,gitSnapshots:[],archiveEvents:[],reconciliations:[],restoreTokens:[],previews:0,reviewRefreshes:0,...options};
     const source=ts.createSourceFile('extension.ts',fs.readFileSync('src/extension.ts','utf8'),ts.ScriptTarget.Latest,true);
     const helpers=[],callbacks=[];
-    const names=new Set(['diffTracker.openDiffDefault','diffTracker.showOriginalAndWebviewSplit','diffTracker.showWebviewDiff','diffTracker.clearDiffs','diffTracker.selectDefaultOpenMode','diffTracker.selectWebviewDiffStyle',archiveRestoreCommand]);
+    const names=new Set(['diffTracker.openDiffDefault','diffTracker.showOriginalAndWebviewSplit','diffTracker.showWebviewDiff','diffTracker.showSideBySideDiff','diffTracker.showSideBySideDiffActive','diffTracker.clearDiffs','diffTracker.selectDefaultOpenMode','diffTracker.selectWebviewDiffStyle',archiveRestoreCommand]);
     function visit(node){
         if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='startRecordingAfterPrechecks')helpers.push(`const ${node.getText(source)};`);
         if(ts.isFunctionDeclaration(node)&&['extractFilePath','extractIsDeleted','getDefaultOpenMode','isDeletedReview'].includes(node.name?.text))helpers.push(node.getText(source));
@@ -1397,11 +1431,12 @@ function commandHarness(options={}) {
         ts.forEachChild(node,visit);
     }
     visit(source);
-    class Uri {constructor(fsPath,scheme='file'){this.fsPath=fsPath;this.scheme=scheme;}static file(p){return new Uri(p);}}
+    class Uri {constructor(fsPath,scheme='file'){this.fsPath=fsPath;this.scheme=scheme;}static file(p){return new Uri(p);}with(change){return Object.assign(new Uri(this.fsPath,this.scheme),change);}}
     let sandbox;
     const vscode={Uri,ConfigurationTarget:{Global:1,Workspace:2},ViewColumn:{One:1,Two:2},
         workspace:{getConfiguration:()=>({get:(_key,fallback)=>state.mode??fallback,inspect:key=>({workspaceValue:state.workspaceConfiguration?.[key]}),update:async(...args)=>state.updates.push(args)}),openTextDocument:async()=>{state.opened++;if(state.deleted)throw Object.assign(new Error('FileNotFound'),{code:'FileNotFound'});return{};}},
         window:{
+            get activeTextEditor(){return state.activeTextEditor;},
             showTextDocument:async()=>{},
             showQuickPick:async items=>{state.pickerItems=items;return items.find(item=>item.value===state.chooseMode);},
             showInformationMessage:m=>{state.archiveEvents.push('information');state.info.push(m);},
@@ -1433,7 +1468,7 @@ function commandHarness(options={}) {
         isReady:()=>{state.archiveEvents.push('ready');return state.gitReady;},
         getSnapshots:()=>{state.archiveEvents.push('snapshots');return state.gitSnapshots;}
     };
-    sandbox={vscode,diffTracker:tracker,context:{extensionUri:{}},WebviewDiffPanel:{createOrShow:()=>state.panels++},
+    sandbox={vscode,diffTracker:tracker,displayFileName:path.basename,context:{extensionUri:{}},WebviewDiffPanel:{createOrShow:()=>state.panels++},
         settingsTreeDataProvider:{refresh(){}},refreshChangesTree:()=>{},decorationManager:{clearAllDecorations:()=>{}},
         setRecordingContext:value=>{state.archiveEvents.push('setRecordingContext');state.recordingContexts.push(value);},
         gitContextMonitor,refreshReview:()=>{state.archiveEvents.push('refresh');state.reviewRefreshes++;},console};
@@ -1614,6 +1649,46 @@ await test('ordinary open retains old modes, invalid-value Webview fallback and 
     }
     const h=commandHarness({mode:'nativeReview'});await h.run('diffTracker.openDiffDefault');
     assert.deepEqual(h.state.executed,[]);
+});
+for (const recording of [false, true]) {
+    await test(`side-by-side opens ${recording ? 'the live file while recording' : 'a captured review while stopped'}`, async () => {
+        const h = commandHarness({ recording, deleted: false });
+        for (const target of [filePath, { filePath }, new h.Uri(filePath)]) {
+            h.state.executed.length = 0;
+            await h.run('diffTracker.showSideBySideDiff', target);
+            const call = h.state.executed[0];
+            assert.equal(h.state.executed.length, 1, 'choose exactly one review route');
+            if (recording) {
+                assert.equal(call[0], 'vscode.diff');
+                assert.equal(call[1].scheme, 'diff-tracker-original');
+                assert.equal(call[2].scheme, 'file');
+                assert.equal(call[2].fsPath, filePath);
+                assert.match(call[3], /Original  ↔  Live File:/, 'a live tab remains explicitly labeled even after Stop');
+            } else {
+                assert.deepEqual(call, ['diffTracker.nativeReview.openFile', filePath],
+                    'the existing adapter supplies immutable text and safe opaque/unknown fallback');
+            }
+        }
+        assert.equal(h.state.opened, 0, 'do not read a working document to capture a stopped review');
+        assert.deepEqual(h.state.updates, [], 'the selected open mode remains unchanged');
+    });
+}
+await test('side-by-side handles a missing target without opening a live or snapshot editor', async () => {
+    const h = commandHarness();
+    await h.run('diffTracker.showSideBySideDiff');
+    assert.deepEqual(h.state.executed, []);
+});
+await test('side-by-side active-file command uses the same stopped snapshot route', async () => {
+    const h = commandHarness({ deleted: false });
+    h.state.activeTextEditor = { document: { uri: new h.Uri(filePath) } };
+    await h.run('diffTracker.showSideBySideDiffActive');
+    assert.deepEqual(h.state.executed, [
+        ['diffTracker.showSideBySideDiff', filePath], ['diffTracker.nativeReview.openFile', filePath]
+    ]);
+    h.state.executed.length = 0;
+    h.state.activeTextEditor = { document: { uri: new h.Uri(filePath, 'diff-tracker-review-current') } };
+    await h.run('diffTracker.showSideBySideDiffActive');
+    assert.deepEqual(h.state.executed, [], 'virtual snapshot is not reinterpreted as a working file');
 });
 await test('native default delegates the unchanged target to the guarded adapter',async()=>{
     const h=commandHarness({mode:'nativeReview',deleted:false});

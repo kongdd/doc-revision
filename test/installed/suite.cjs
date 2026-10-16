@@ -169,7 +169,7 @@ async function scenario(phase, report) {
         if (candidate) {
             const persisted = state();
             // It may still be the original V3 until the regular writer flushes.
-            if (persisted.version === 4) { assert.equal(persisted.effectiveMonitoringScope.kind, 'legacyV3'); }
+            if (persisted.version === 5) { assert.equal(persisted.effectiveMonitoringScope.kind, 'legacyV3'); }
             report.observations.push('Unchanged ordered Global legacy rules; no automatic scope migration');
         }
     }

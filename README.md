@@ -91,7 +91,9 @@ The project retains the MIT license and upstream attribution. The Marketplace ex
    - Native Review Snapshot
 6. In WebView Diff, use block-level **Undo/Keep** or file-level **Keep All/Reject All**.
 7. Use **Revert File** / **Revert Text Changes** for eligible text, or **Acknowledge Read-only Change** for eligible opaque changes.
-8. Stop recording when you no longer want to track changes.
+8. Stop recording when you no longer want to track changes. Existing pending reviews keep the last captured content, including after reload; later edits, deletions and new files are not added. Keep/Revert still verify the actual file and editor, and refuse stale review without overwriting newer edits or refreshing the stopped snapshot. Start explicitly captures a new baseline and resumes recording.
+
+When stopped, opening Side-by-Side Diff uses a read-only Review Snapshot. Already-open **Live File** diffs remain normal VS Code views of working files; reopen **Native Review Snapshot** from the changed file’s context menu to see the stopped capture.
 
 **Clear Diffs** resets the baseline to the current workspace while recording. When recording is stopped, it clears the saved baseline and Undo history and remains stopped, including after reload. It does not modify workspace files or dirty buffers.
 
@@ -283,13 +285,13 @@ try {
 
 When upgrading from older DiffTracker builds, saved review sessions remain associated with the extension ID that created them. Sessions from `TinyTigerPan.diff-tracker` or earlier `lengmh.diff-tracker` test builds are not migrated automatically to `lengmh.code-diff-tracker`.
 
-Since `0.8.0`, Code Diff Tracker saves review sessions as **Session V4** and supports migration of valid V1/V2/V3 sessions. V4 preserves effective scope and durable gap evidence; observation coverage is re-established after activation. Restored older sessions remain in scope-compatibility mode until explicit rule migration and scope preparation succeed. Cancelled or failed migration retains the existing review state.
+This build saves review sessions as **Session V5**, adding bounded stopped-review snapshots to the effective scope and durable gap evidence introduced in V4. Valid V1–V4 sessions remain readable; observation coverage is re-established after activation. Restored older sessions remain in scope-compatibility mode until explicit rule migration and scope preparation succeed. Cancelled or failed migration retains the existing review state.
 
 Version `0.7.2` already stores existence and content identity for opaque files. Upgrading preserves the evidence available in the saved session; it cannot reconstruct a missing historical fingerprint from the current file. Paths without a known before-image or reliable baseline scan remain visibly unknown.
 
 Text review sessions and ordered legacy rules have been verified when upgrading from released `0.7.2` to V4. Migration of opaque-file state from that release has not been verified. Recovery of opaque state newly created by the candidate build has been checked across process restarts; this does not verify recovery of older opaque state or behavior after **Reload Window**. Preserve the workspace and extension storage before upgrading, especially when opaque changes are pending.
 
-V4 is incompatible with released `0.7.2`; downgrade recovery must be blocked rather than silently discard scope or review data. Preserve the workspace and extension storage before changing versions. Do not delete recovery markers or saved state merely to bypass a compatibility warning.
+V5 is incompatible with builds that only read V4 or older formats; downgrade recovery is blocked rather than silently recapturing post-Stop edits or discarding saved review data. Older stopped sessions did not save pending current-content snapshots, so their baselines are preserved in an incomplete, paused state without guessing the missing review. Start or rebuild explicitly when ready. Explicit archived-review restoration retains its documented one-time current-filesystem reconciliation. Preserve the workspace and extension storage before changing versions. Do not delete recovery markers or saved state merely to bypass a compatibility warning.
 
 ## Known Issues
 

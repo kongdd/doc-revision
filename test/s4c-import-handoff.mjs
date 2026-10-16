@@ -51,7 +51,7 @@ export function registerS4CImportHandoff(h, fixture) {
         for (let iteration = 0; iteration < 2; iteration++) {
             assert.equal(await tracker.flushPendingPersistence(), true);
             const saved = JSON.parse(fs.readFileSync(path.join(storage.fsPath, 'session-state.json'), 'utf8'));
-            assert.equal(saved.version, 4);
+            assert.equal(saved.version, 5);
             assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].subtree.reasonCode,
                 'imported-coverage-restart-required');
             assert.equal(saved.coverageGaps.find(([root]) => root === imported)?.[1].importedCoverageRequired, true);

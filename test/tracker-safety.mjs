@@ -9,6 +9,8 @@ import { registerArchivedGitReview } from './archived-git-review.mjs';
 import { registerPR12BoundedInvariants } from './pr12-bounded-invariants.mjs';
 import { registerNativeReviewInvariants } from './native-review-invariants.mjs';
 import { registerPR11ReviewRegressions } from './pr11-review-regressions.mjs';
+import { registerStoppedReviewFreeze } from './stopped-review-freeze.mjs';
+import { registerStoppedReviewActions } from './stopped-review-actions.mjs';
 /** Production regression tests. Only the VS Code API boundary is faked.
  * No diff, existence, acceptance or recovery algorithm is copied into this test.
  * DT_SOURCE may point at an archived baseline source for red/green comparison.
@@ -641,23 +643,26 @@ test('existing V1 persistence preserves absent versus empty baseline and paused 
     const storage=path.join(root,`storage-${index++}`); tracker.storageUri=Uri.file(storage); tracker.isRecording=false;
     await tracker.flushPersistState();
     const saved=JSON.parse(fs.readFileSync(path.join(storage,'session-state.json'),'utf8'));
-    assert.equal(saved.version,4); assert.equal(saved.isRecording,false); assert.equal(saved.baselineState,'ready');
+    assert.equal(saved.version,5); assert.equal(saved.isRecording,false); assert.equal(saved.baselineState,'ready');
     const loaded=await tracker.loadPersistedState(); assert.equal(loaded.isRecording,false);
     assert.ok(loaded.baselineExistingFiles.includes(empty)); assert.equal(loaded.baselineExistingFiles.includes(absent),false);
     assert.ok(loaded.fileSnapshots.some(([p,t])=>p===absent&&t===''));
 });
 test('DT-06 atomic persistence keeps a last-good state and recovers a corrupted primary',async()=>{
     const p=file(); seed(p,'baseline','pending'); await scan(p);
+    // Resolve root identity after the fixture exists so this regression also
+    // works alone, without relying on files left by earlier harness cases.
+    tracker.effectiveMonitoringScope=tracker.createLegacyEffectiveScopeForRoots(tracker.getWorkspaceRoots());
     const storage=path.join(root,`storage-${index++}`); tracker.storageUri=Uri.file(storage);
     assert.equal(await tracker.flushPersistState(),true);
     const primary=path.join(storage,'session-state.json');
     const backup=path.join(storage,'session-state.last-good.json');
     assert.equal(fs.existsSync(backup),true);
-    const valid=JSON.parse(fs.readFileSync(backup,'utf8')); assert.equal(valid.version,4);
+    const valid=JSON.parse(fs.readFileSync(backup,'utf8')); assert.equal(valid.version,5);
     fs.writeFileSync(primary,'{"version":2,');
 
     tracker=new DiffTracker(Uri.file(storage));
-    assert.equal(await tracker.restorePersistedState(),'recovered');
+    assert.equal(await tracker.restorePersistedState(),'recovered',tracker.getPersistenceIssue());
     assert.equal(tracker.getOriginalContent(p),'baseline'); assert.equal(pending(p)?.currentContent,'pending');
     assert.match(tracker.getPersistenceIssue()??'',/last-good/i);
 });
@@ -770,16 +775,17 @@ test('DT-08 queued Undo calls cannot mutate after the recording session stops',a
     assert.equal(results.reduce((total,result)=>total+result.succeeded,0),0);
     assert.equal(disk(p),'baseline');assert.equal(tracker.revertHistory.length,1);
 });
-test('DT-06 valid V1 state migrates in memory and the next durable write is strict V4',async()=>{
+test('DT-06 stopped V1 state preserves incomplete review and the next durable write is strict V5',async()=>{
     const p=file(); fs.writeFileSync(p,'changed');
     const storage=path.join(root,`storage-${index++}`); fs.mkdirSync(storage);
     fs.writeFileSync(path.join(storage,'session-state.json'),JSON.stringify({
         version:1,isRecording:false,fileSnapshots:[[p,'baseline']],baselineExistingFiles:[p]
     }));
-    tracker.storageUri=Uri.file(storage); assert.equal(await tracker.restorePersistedState(),'restored');
-    assert.equal(tracker.getOriginalContent(p),'baseline'); assert.ok(pending(p));
+    tracker.storageUri=Uri.file(storage); assert.equal(await tracker.restorePersistedState(),'incomplete');
+    assert.equal(tracker.getOriginalContent(p),'baseline'); assert.equal(pending(p),undefined);
+    assert.equal(tracker.getIsRecording(),false);
     assert.equal(await tracker.flushPendingPersistence(),true);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(storage,'session-state.json'),'utf8')).version,4);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(storage,'session-state.json'),'utf8')).version,5);
 });
 test('DT-06 explicit discard is required before a blocked session can start',async()=>{
     const storage=path.join(root,`storage-${index++}`); fs.mkdirSync(storage);
@@ -5729,6 +5735,18 @@ registerArchivedGitReview({
     test, Uri, DiffTracker, vscode, file, document, faults, counters, pause, emitWatcher, waitUntil, watcherInstances,
     emitWorkspaceFilesCreated: event => workspaceFilesCreated(event),
     fireConfigurationChanged: key => configurationChanged({ affectsConfiguration: name => name === key }),
+    getTracker: () => tracker,
+    setTracker: value => { tracker = value; },
+    setListedFiles: value => { listedFiles = value; }
+});
+
+registerStoppedReviewActions({
+    test, Uri, file, seed, scan, pending, pause, document, counters,
+    getTracker: () => tracker
+});
+
+registerStoppedReviewFreeze({
+    test, Uri, DiffTracker, vscode, file, document, counters, pause, emitWatcher, waitUntil, watcherInstances,
     getTracker: () => tracker,
     setTracker: value => { tracker = value; },
     setListedFiles: value => { listedFiles = value; }

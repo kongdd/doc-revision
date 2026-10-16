@@ -247,7 +247,7 @@ try {
     assert.deepEqual(tracker.getTrackedChanges(), []);
     assert.equal(await tracker.flushPendingPersistence(), true);
     const prepared = readSession();
-    assert.equal(prepared.version, 4);
+    assert.equal(prepared.version, 5);
     assert.equal(prepared.fileSnapshots.length, initialKinds.text);
     assert.equal(prepared.opaqueBaselineFiles.length, initialKinds.opaque);
     assert.equal(prepared.unresolvedBaselineFiles.length, 0);

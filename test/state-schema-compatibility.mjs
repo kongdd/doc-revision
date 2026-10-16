@@ -1,6 +1,8 @@
 /** Persisted-schema migration and downgrade safety, using the production tracker.
  * DT_EXPECT_LEGACY_REJECTION=1 runs the downgrade subset with DT_SOURCE pointing
  * to the released 0.7.2 tracker; normal npm test exercises the current writer.
+ * DT_EXPECT_V5_PREDECESSOR_REJECTION=1 with DT_TEST_FILTER='SCHEMA-DOWNGRADE V5'
+ * and DT_SOURCE pointing to the preceding V4 tracker verifies the Stop boundary.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -34,6 +36,70 @@ export function registerStateSchemaCompatibility(harness) {
                 }]]
             }
         };
+    }
+
+    function stoppedFixture() {
+        const { target, state } = fixture(5);
+        const text = file('schema-frozen.txt');
+        const unknown = file('schema-unknown.txt');
+        state.isRecording = false;
+        state.fileSnapshots = [[text, 'baseline\n']];
+        state.baselineExistingFiles = [text];
+        state.unresolvedBaselineFiles = [[unknown, 'Baseline unavailable before Stop']];
+        state.stoppedReviews = [
+            {filePath:text, currentContent:'pending at Stop\n', isDeleted:false,
+                reviewKind:'text', baselineExists:true, currentExists:true, timestamp:1234},
+            {filePath:target, currentContent:'', isDeleted:false,
+                reviewKind:'opaque', reviewReason:'Unsupported bytes changed before Stop',
+                baselineExists:true, currentExists:true, baselineSize:4, currentSize:5,
+                baselineFingerprint:state.opaqueBaselineFiles[0][1].fingerprint,
+                currentFingerprint:'b'.repeat(64), timestamp:2345},
+            {filePath:unknown, currentContent:'', isDeleted:false,
+                reviewKind:'unknown', unavailableReason:'Baseline unavailable before Stop', timestamp:3456}
+        ];
+        return {target, text, unknown, state};
+    }
+
+    for (const layout of ['primary', 'both', 'backup', 'interrupted-upgrade']) {
+        test(`SCHEMA-DOWNGRADE V5 stopped review preserves ${layout} state in older readers`, async () => {
+            const {state, text:target} = stoppedFixture();
+            const tracker = getTracker();
+            if (process.env.DT_EXPECT_LEGACY_REJECTION !== '1' && process.env.DT_EXPECT_V5_PREDECESSOR_REJECTION !== '1') {
+                assert.equal(tracker.parsePersistedState(state)?.version, 5);
+                return;
+            }
+            assert.equal(tracker.parsePersistedState(state), undefined,
+                'older readers must reject V5 rather than recapture post-Stop bytes');
+            fs.writeFileSync(target, 'unrecorded edit after Stop\n');
+            const storage = file('v5-downgrade-storage');
+            fs.mkdirSync(storage);
+            tracker.storageUri = Uri.file(storage);
+            setListedFiles([Uri.file(target)]);
+            if (layout !== 'backup') {
+                fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
+            }
+            if (layout === 'both' || layout === 'backup') {
+                fs.writeFileSync(path.join(storage, 'session-state.last-good.json'), JSON.stringify(state));
+            }
+            if (layout === 'interrupted-upgrade') {
+                const previous = {...state, version:4};
+                delete previous.stoppedReviews;
+                fs.writeFileSync(path.join(storage, 'session-state.last-good.json'), JSON.stringify(previous));
+                fs.writeFileSync(path.join(storage, 'session-state.unsaved'), 'Session write incomplete');
+            }
+            const before = new Map(fs.readdirSync(storage).map(name => [name, fs.readFileSync(path.join(storage, name))]));
+            const bytes = fs.readFileSync(target);
+            assert.equal(await tracker.restorePersistedState(), 'blocked');
+            tracker.startRecording();
+            assert.equal(tracker.getIsRecording(), false);
+            assert.equal(await tracker.flushPendingPersistence(), false);
+            await tracker.dispose();
+            assert.deepEqual(fs.readdirSync(storage).sort(), [...before.keys()].sort());
+            for (const [name, content] of before) {
+                assert.deepEqual(fs.readFileSync(path.join(storage, name)), content);
+            }
+            assert.deepEqual(fs.readFileSync(target), bytes);
+        });
     }
 
     test('SCHEMA-DOWNGRADE root Recheck sentinel preserves state when the reader predates it', async () => {
@@ -141,8 +207,8 @@ export function registerStateSchemaCompatibility(harness) {
         return;
     }
 
-    for (const version of [1, 2, 3, 4]) {
-        test(`SCHEMA-V4 normalize V${version} preserves existence and provenance`, async () => {
+    for (const version of [1, 2, 3, 4, 5]) {
+        test(`SCHEMA-V${version === 5 ? 5 : 4} normalize V${version} preserves existence and provenance`, async () => {
             const tracker = getTracker();
             const existing = file('existing.txt'), absent = file('new.txt');
             const state = {
@@ -157,6 +223,7 @@ export function registerStateSchemaCompatibility(harness) {
                 retainedReviewPaths: [], coverageGaps: [], legacyWatchExcludeByRoot: []
             };
             if (version >= 3) { state.opaqueBaselineFiles = []; }
+            if (version === 5) { state.stoppedReviews = []; }
             if (version < 4) {
                 delete state.effectiveMonitoringScope;
                 delete state.retainedReviewPaths;
@@ -165,7 +232,7 @@ export function registerStateSchemaCompatibility(harness) {
             }
             const parsed = tracker.parsePersistedState(state);
             assert.ok(parsed);
-            assert.equal(parsed.version, 4);
+            assert.equal(parsed.version, version === 5 ? 5 : 4);
             assert.equal(parsed.migratedFromV1, version === 1);
             assert.equal(parsed.scanCoverage, version === 1 ? undefined : state.scanCoverage);
             assert.deepEqual(parsed.fileSnapshots, state.fileSnapshots);
@@ -173,8 +240,128 @@ export function registerStateSchemaCompatibility(harness) {
             assert.deepEqual(parsed.fileModes, [[existing, 0o644]]);
             assert.deepEqual(parsed.opaqueBaselineFiles, []);
             assert.deepEqual(parsed.legacyWatchExcludeByRoot, []);
+            assert.deepEqual(parsed.stoppedReviews, version === 5 ? [] : undefined);
         });
     }
+
+    for (const version of [1, 2, 3, 4]) {
+        test(`SCHEMA-V${version} stopped migration preserves baseline and never guesses the missing pending review`, async () => {
+            const {state} = fixture(version);
+            const target = file('legacy-stopped-review.txt');
+            state.isRecording = false;
+            state.fileSnapshots = [[target, 'original baseline\n']];
+            state.baselineExistingFiles = [target];
+            state.opaqueBaselineFiles = [];
+            if (version < 3) { delete state.opaqueBaselineFiles; }
+            if (version < 4) {
+                delete state.effectiveMonitoringScope;
+                delete state.retainedReviewPaths;
+                delete state.coverageGaps;
+                delete state.legacyWatchExcludeByRoot;
+            }
+            fs.writeFileSync(target, 'unrecorded edit after Stop\n');
+            const storage = file('legacy-stopped-storage');
+            fs.mkdirSync(storage);
+            fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
+            const tracker = getTracker();
+            tracker.storageUri = Uri.file(storage);
+            setListedFiles([Uri.file(target)]);
+            assert.equal(await tracker.restorePersistedState(), 'incomplete');
+            assert.equal(tracker.getIsRecording(), false);
+            assert.equal(tracker.getOriginalContent(target), 'original baseline\n');
+            assert.equal(pending(target), undefined);
+            assert.match(tracker.getPersistenceIssue() ?? '', /older stopped session/i);
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+            assert.equal(saved.version, 5);
+            assert.equal(saved.baselineState, 'building');
+            assert.deepEqual(saved.fileSnapshots, state.fileSnapshots);
+            assert.deepEqual(saved.baselineExistingFiles, [target]);
+            assert.deepEqual(saved.stoppedReviews, []);
+            assert.equal(fs.readFileSync(target, 'utf8'), 'unrecorded edit after Stop\n');
+        });
+    }
+
+    test('SCHEMA-V5 stopped text, opaque and unknown reviews survive a JSON roundtrip and reload', async () => {
+        const {state, target, text:targetText, unknown} = stoppedFixture();
+        const tracker = getTracker();
+        const parsed = tracker.parsePersistedState(JSON.parse(JSON.stringify(state)));
+        assert.equal(parsed?.version, 5);
+        assert.deepEqual(JSON.parse(JSON.stringify(parsed.stoppedReviews)), state.stoppedReviews);
+        const storage = file('v5-stopped-roundtrip-storage');
+        fs.mkdirSync(storage);
+        fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
+        fs.writeFileSync(targetText, 'unrecorded edit after Stop\n');
+        fs.unlinkSync(target);
+        fs.writeFileSync(unknown, 'newly readable after Stop\n');
+        tracker.storageUri = Uri.file(storage);
+        setListedFiles([Uri.file(targetText), Uri.file(unknown)]);
+        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.equal(tracker.getIsRecording(), false);
+        assert.equal(pending(targetText)?.currentContent, 'pending at Stop\n');
+        assert.equal(pending(targetText)?.originalContent, 'baseline\n');
+        assert.equal(pending(target)?.reviewKind, 'opaque');
+        assert.equal(pending(target)?.currentExists, true, 'post-Stop deletion must not change the frozen review');
+        assert.equal(pending(unknown)?.reviewKind, 'unknown');
+        assert.equal(pending(unknown)?.currentContent, '');
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        for (const name of ['session-state.json', 'session-state.last-good.json']) {
+            const saved = JSON.parse(fs.readFileSync(path.join(storage, name), 'utf8'));
+            assert.equal(saved.version, 5);
+            assert.deepEqual(saved.stoppedReviews, [...state.stoppedReviews].sort((a, b) => a.filePath.localeCompare(b.filePath)));
+        }
+        assert.equal(fs.readFileSync(targetText, 'utf8'), 'unrecorded edit after Stop\n');
+        assert.equal(fs.existsSync(target), false);
+    });
+
+    for (const version of [1, 2, 3, 4]) {
+        test(`SCHEMA-V5 rejects frozen review payload mislabeled as V${version}`, () => {
+            const {state} = stoppedFixture();
+            state.version = version;
+            assert.equal(getTracker().parsePersistedState(state), undefined);
+        });
+    }
+
+    const malformedStoppedReviews = [
+        ['missing payload', state => { delete state.stoppedReviews; }],
+        ['null payload', state => { state.stoppedReviews = null; }],
+        ['object payload', state => { state.stoppedReviews = {}; }],
+        ['recording payload', state => { state.isRecording = true; }],
+        ['null review', state => { state.stoppedReviews = [null]; }],
+        ['duplicate path', state => { state.stoppedReviews.push({...state.stoppedReviews[0]}); }],
+        ['relative path', state => { state.stoppedReviews[0].filePath = 'relative.txt'; }],
+        ['unowned path', state => { state.stoppedReviews[0].filePath = file('unowned.txt'); }],
+        ['nontext current bytes', state => { state.stoppedReviews[0].currentContent = null; }],
+        ['nonboolean deletion', state => { state.stoppedReviews[0].isDeleted = 'false'; }],
+        ['invalid review kind', state => { state.stoppedReviews[0].reviewKind = 'binary'; }],
+        ['text without text baseline', state => { state.stoppedReviews[1].reviewKind = 'text'; }],
+        ['nonfinite timestamp', state => { state.stoppedReviews[0].timestamp = Infinity; }],
+        ['out-of-range date', state => { state.stoppedReviews[0].timestamp = 8.64e15 + 1; }],
+        ['nonstring reason', state => { state.stoppedReviews[0].reviewReason = {}; }],
+        ['oversized reason', state => { state.stoppedReviews[0].unavailableReason = 'x'.repeat(4001); }],
+        ['nonboolean existence', state => { state.stoppedReviews[0].baselineExists = 1; }],
+        ['contradictory deletion', state => { state.stoppedReviews[0].currentExists = false; }],
+        ['negative size', state => { state.stoppedReviews[1].currentSize = -1; }],
+        ['fractional size', state => { state.stoppedReviews[1].baselineSize = 1.5; }],
+        ['invalid fingerprint', state => { state.stoppedReviews[1].currentFingerprint = 'bad'; }],
+        ['invalid reminder', state => { state.stoppedReviews[0].largeFileReminder = {pending:true}; }]
+    ];
+    for (const [description, mutate] of malformedStoppedReviews) {
+        test(`SCHEMA-V5 rejects ${description}`, () => {
+            const {state} = stoppedFixture();
+            mutate(state);
+            assert.equal(getTracker().parsePersistedState(state), undefined);
+        });
+    }
+
+    test('SCHEMA-V5 recording sessions omit frozen payload and stopped empty payload is explicit', () => {
+        const {state} = fixture(5);
+        assert.equal(getTracker().parsePersistedState(state)?.version, 5);
+        state.isRecording = false;
+        assert.equal(getTracker().parsePersistedState(state), undefined);
+        state.stoppedReviews = [];
+        assert.deepEqual(getTracker().parsePersistedState(state)?.stoppedReviews, []);
+    });
 
     test('SCHEMA-V4 migrates pre-release V2 opaque identities without discarding them', async () => {
         const { state } = fixture(2);
@@ -192,14 +379,14 @@ export function registerStateSchemaCompatibility(harness) {
             assert.equal(getTracker().parsePersistedState(state), undefined);
         });
     }
-    for (const version of [0, 5, 999, '4']) {
+    for (const version of [0, 6, 999, '4', '5']) {
         test(`SCHEMA-V4 rejects unsupported version ${JSON.stringify(version)}`, async () => {
             const { state } = fixture(version);
             assert.equal(getTracker().parsePersistedState(state), undefined);
         });
     }
 
-    test('SCHEMA-V4 writes primary and backup with effective scope and opaque identities', async () => {
+    test('SCHEMA-V5 writes primary and backup with effective scope and opaque identities', async () => {
         const tracker = getTracker();
         const { target } = fixture();
         const storage = file('writer-storage');
@@ -209,7 +396,7 @@ export function registerStateSchemaCompatibility(harness) {
         assert.equal(await tracker.flushPendingPersistence(), true);
         for (const name of ['session-state.json', 'session-state.last-good.json']) {
             const saved = JSON.parse(fs.readFileSync(path.join(storage, name), 'utf8'));
-            assert.equal(saved.version, 4);
+            assert.equal(saved.version, 5);
             assert.deepEqual(saved.opaqueBaselineFiles, [...tracker.opaqueBaselineFiles.entries()]);
             assert.equal(saved.effectiveMonitoringScope.kind, 'legacyV3');
             assert.deepEqual(saved.retainedReviewPaths, []);
@@ -238,7 +425,7 @@ export function registerStateSchemaCompatibility(harness) {
             assert.match(pending(target)?.reviewReason ?? '', /deleted.*unsupported baseline/i);
             assert.equal(await tracker.flushPendingPersistence(), true);
             const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
-            assert.equal(saved.version, 4);
+            assert.equal(saved.version, 5);
             assert.deepEqual(saved.opaqueBaselineFiles, state.opaqueBaselineFiles);
         });
     }
@@ -306,7 +493,7 @@ export function registerStateSchemaCompatibility(harness) {
         fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
         const tracker = new DiffTracker(Uri.file(storage));
         setTracker(tracker);
-        assert.equal(await tracker.restorePersistedState(), 'restored');
+        assert.equal(await tracker.restorePersistedState(), 'incomplete');
         assert.equal(pending(directory), undefined, 'legacy directory sentinels must not reappear as unknown file reviews');
         assert.equal(tracker.getOriginalContent(directory), undefined, 'a directory must not retain an empty text file baseline');
         assert.ok(tracker.getCoverageGaps().some(([target]) => target === directory),
@@ -320,7 +507,7 @@ export function registerStateSchemaCompatibility(harness) {
         assert.equal(savedGap?.file, undefined);
     });
 
-    test('SCHEMA-V4 restores coverage-gap snapshots as unknown reviews', async () => {
+    test('SCHEMA-V4 stopped coverage gaps preserve baselines without inventing a current review', async () => {
         const target = file('coverage-gap.txt');
         fs.writeFileSync(target, 'changed while unverified\n');
         const storage = file('coverage-gap-storage');
@@ -339,13 +526,15 @@ export function registerStateSchemaCompatibility(harness) {
         fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
         const tracker = new DiffTracker(Uri.file(storage));
         setTracker(tracker);
-        assert.equal(await tracker.restorePersistedState(), 'restored');
-        assert.equal(pending(target)?.reviewKind, 'unknown');
-        assert.match(pending(target)?.unavailableReason ?? '', /observation gap/i);
+        assert.equal(await tracker.restorePersistedState(), 'incomplete');
+        assert.equal(pending(target), undefined);
+        assert.equal(tracker.getOriginalContent(target), 'baseline\n');
+        assert.ok(tracker.getCoverageGaps().some(([path]) => path === target));
+        assert.match(tracker.persistenceIssue ?? '', /older stopped session/i);
         assert.equal(tracker.getReviewToken(target), undefined);
     });
 
-    test('SCHEMA-V4 pending explicit exclusion preserves restored baseline review as unknown', async () => {
+    test('SCHEMA-V5 pending explicit exclusion preserves the frozen review as unknown', async () => {
         const target = file('pending-exclude.txt');
         fs.writeFileSync(target, 'changed while pending\n');
         const storage = file('pending-exclude-storage');
@@ -356,12 +545,14 @@ export function registerStateSchemaCompatibility(harness) {
             caseSensitive: process.platform !== 'win32' && process.platform !== 'darwin'
         };
         const state = {
-            version: 4, isRecording: false, baselineState: 'ready', workspaceRoots: [root],
+            version: 5, isRecording: false, baselineState: 'ready', workspaceRoots: [root],
             scanCoverage: 'a'.repeat(64),
             fileSnapshots: [[target, 'baseline\n']], fileModes: [], baselineExistingFiles: [target],
             unresolvedBaselineFiles: [], opaqueBaselineFiles: [], revertHistory: [], gitContexts: [],
             effectiveMonitoringScope: createLegacyEffectiveScope([rootIdentity], []),
-            retainedReviewPaths: [], coverageGaps: []
+            retainedReviewPaths: [], coverageGaps: [],
+            stoppedReviews: [{filePath:target, currentContent:'pending at Stop\n', isDeleted:false,
+                reviewKind:'text', timestamp:Date.now()}]
         };
         fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
         const pendingScope = validateAndCanonicalizeScope({
@@ -378,15 +569,15 @@ export function registerStateSchemaCompatibility(harness) {
         assert.deepEqual(tracker.getExplicitlyExcludedPendingReviewPaths(pendingScope), [target]);
     });
 
-    test('SCHEMA-V4 requires effective scope, retained reviews and coverage gaps', async () => {
+    for (const version of [4, 5]) test(`SCHEMA-V${version} requires effective scope, retained reviews and coverage gaps`, async () => {
         for (const field of ['effectiveMonitoringScope', 'retainedReviewPaths', 'coverageGaps']) {
-            const { state } = fixture(4);
+            const { state } = fixture(version);
             delete state[field];
-            assert.equal(getTracker().parsePersistedState(state), undefined, `missing ${field} must invalidate V4`);
+            assert.equal(getTracker().parsePersistedState(state), undefined, `missing ${field} must invalidate V${version}`);
         }
     });
 
-    test('SCHEMA-V3 migration enters legacy scope compatibility and next write is V4', async () => {
+    test('SCHEMA-V3 migration enters legacy scope compatibility and next write is V5', async () => {
         const { state } = fixture(3);
         delete state.effectiveMonitoringScope;
         delete state.retainedReviewPaths;
@@ -396,18 +587,18 @@ export function registerStateSchemaCompatibility(harness) {
         assert.equal(parsed.version, 4);
         assert.equal(parsed.effectiveMonitoringScope.kind, 'legacyV3');
         const tracker = getTracker();
-        const storage = file('v3-to-v4-storage');
+        const storage = file('v3-to-v5-storage');
         fs.mkdirSync(storage);
         fs.writeFileSync(path.join(storage, 'session-state.json'), JSON.stringify(state));
         tracker.storageUri = Uri.file(storage);
         assert.equal(await tracker.restorePersistedState(), 'restored');
         assert.equal(await tracker.flushPendingPersistence(), true);
         const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
-        assert.equal(saved.version, 4);
+        assert.equal(saved.version, 5);
         assert.equal(saved.effectiveMonitoringScope.kind, 'legacyV3');
     });
 
-    for (const version of [2, 3, 4]) {
+    for (const version of [2, 3, 4, 5]) {
         test(`SCHEMA-MTIME V${version} accepts finite pre-epoch timestamps`, async () => {
             const { state } = fixture(version);
             state.opaqueBaselineFiles[0][1].mtime = -315619200000;
@@ -468,7 +659,7 @@ export function registerStateSchemaCompatibility(harness) {
     }
 
     for (const failAt of ['write', 'rename', 'copy']) {
-        test(`SCHEMA-V4 interrupted V2 upgrade at ${failAt} retains durable intent until retry`, async () => {
+        test(`SCHEMA-V5 interrupted V2 upgrade at ${failAt} retains durable intent until retry`, async () => {
             const tracker = getTracker();
             const { state } = fixture(2);
             state.isRecording = false;
@@ -491,7 +682,7 @@ export function registerStateSchemaCompatibility(harness) {
             assert.equal(await tracker.flushPendingPersistence(), true);
             assert.equal(fs.existsSync(path.join(storage, 'session-state.unsaved')), false);
             for (const p of [primary, backup]) {
-                assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).version, 4);
+                assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).version, 5);
             }
         });
     }
