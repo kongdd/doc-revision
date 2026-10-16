@@ -10,7 +10,8 @@ import path from 'node:path';
 
 export function registerStoppedReviewFreeze(h) {
     const { test, Uri, DiffTracker, vscode, file, document, counters, pause, emitWatcher,
-        waitUntil, watcherInstances, getTracker, setTracker, setListedFiles } = h;
+        waitUntil, watcherInstances, getTracker, setTracker, setListedFiles,
+        setWatchExclude, setVsCodeExcludes, fireConfigurationChanged } = h;
     const pending = (tracker, target) => tracker.getTrackedChanges().find(change => change.filePath === target);
     const review = (tracker, includeTimestamp = false) => tracker.getTrackedChanges()
         .map(({ timestamp, ...change }) => JSON.parse(JSON.stringify({ ...change,
@@ -85,6 +86,85 @@ export function registerStoppedReviewFreeze(h) {
             vscode.workspace.workspaceFolders = previousFolders;
             vscode.workspace.getWorkspaceFolder = previousGetFolder;
         }
+    }
+
+    for (const policy of ['diffTracker.watchExclude', 'files.exclude', 'search.exclude']) {
+        for (const reloadBeforeRefresh of [false, true]) {
+            test(`STOP-FREEZE policy refresh preserves captured review (${policy}, reloaded=${reloadBeforeRefresh})`, () => fixture(async ctx => {
+                await ctx.stop();
+                let tracker = reloadBeforeRefresh ? await ctx.restart() : ctx.tracker;
+                const captured = review(tracker, true);
+                const baseline = tracker.getOriginalContent(ctx.target);
+                if (policy === 'diffTracker.watchExclude') setWatchExclude([path.basename(ctx.target)]);
+                else setVsCodeExcludes({ [policy]: { [path.basename(ctx.target)]: true } });
+                fireConfigurationChanged(policy);
+                await tracker.refreshIgnoreMatchers();
+                assert.equal(tracker.isPathIgnored(Uri.file(ctx.target)), true, 'the new matcher must take effect');
+                assert.deepEqual(review(tracker, true), captured, 'ordinary policy cannot discard or recapture stopped review');
+                assert.equal(tracker.getOriginalContent(ctx.target), baseline);
+                assert.equal(await tracker.flushPendingPersistence(), true);
+                assert.equal(saved(ctx.storage).stoppedReviews.length, captured.length);
+                tracker = await ctx.restart();
+                await tracker.refreshIgnoreMatchers();
+                assert.deepEqual(review(tracker, true), captured, 'reload and another refresh retain the exact projection');
+                assert.equal(tracker.getIsRecording(), false);
+            }, { targetOnly: true }));
+        }
+    }
+
+    test('STOP-FREEZE active legacy policy exclusion still prunes live review', () => fixture(async ctx => {
+        setWatchExclude([path.basename(ctx.target)]);
+        fireConfigurationChanged('diffTracker.watchExclude');
+        await ctx.tracker.refreshIgnoreMatchers();
+        assert.equal(pending(ctx.tracker, ctx.target), undefined);
+        assert.equal(ctx.tracker.getIsRecording(), true);
+    }, { targetOnly: true }));
+
+    const configuredScope = (tracker, excludes = []) => {
+        const scope = { kind: 'configured', mode: 'rules', roots: tracker.currentWorkspaceRootIdentities(),
+            includes: [], excludes, scopeRevision: '' };
+        scope.scopeRevision = createHash('sha256').update(JSON.stringify({ model: 1, mode: scope.mode,
+            roots: scope.roots, includes: scope.includes, excludes: scope.excludes })).digest('hex');
+        return scope;
+    };
+    test('STOP-FREEZE configured identity loss preserves capture while actions remain blocked', () => fixture(async ctx => {
+        await ctx.stop();
+        assert.equal((await ctx.tracker.applyConfiguredMonitoringScope(configuredScope(ctx.tracker), false, () => true)).status, 'applied');
+        const captured = review(ctx.tracker, true);
+        const token = ctx.tracker.getReviewToken(ctx.target);
+        const originalIdentity = ctx.tracker.workspaceRootIdentityForFolder.bind(ctx.tracker);
+        // Model an unavailable filesystem identity probe, not a replacement
+        // pruning or action algorithm. Both paths still run production guards.
+        ctx.tracker.workspaceRootIdentityForFolder = folder => ({ ...originalIdentity(folder), caseSensitive: undefined });
+        try {
+            await ctx.tracker.refreshIgnoreMatchers();
+            assert.deepEqual(review(ctx.tracker, true), captured, 'identity loss must not rewrite frozen content as unavailable');
+            const before = contents(ctx.target);
+            const result = await ctx.tracker.revertFile(ctx.target, token);
+            assert.notEqual(result.status, 'success', JSON.stringify(result));
+            assert.equal(contents(ctx.target), before);
+            assert.deepEqual(review(ctx.tracker, true), captured);
+        } finally { ctx.tracker.workspaceRootIdentityForFolder = originalIdentity; }
+        assert.equal(await ctx.tracker.flushPendingPersistence(), true);
+        assert.deepEqual(review(await ctx.restart(), true), captured);
+    }, { targetOnly: true }));
+
+    for (const discard of [false, true]) {
+        test(`STOP-FREEZE explicit stopped scope Apply still honors discard=${discard}`, () => fixture(async ctx => {
+            await ctx.stop();
+            const captured = review(ctx.tracker, true);
+            const scope = configuredScope(ctx.tracker, [{ scope: 'all', pattern: path.basename(ctx.target) }]);
+            const result = await ctx.tracker.applyConfiguredMonitoringScope(scope, discard, () => true);
+            assert.equal(result.status, discard ? 'applied' : 'conflict', JSON.stringify(result));
+            if (!discard) assert.match(result.reason, /confirm discard/i);
+            assert.equal(result.capturedBaselines, 0);
+            assert.equal(result.discardedReviews, discard ? 1 : 0);
+            assert.equal(ctx.tracker.getIsRecording(), false);
+            assert.deepEqual(review(ctx.tracker, true), discard ? [] : captured);
+            assert.equal(await ctx.tracker.flushPendingPersistence(), true);
+            const restored = await ctx.restart();
+            assert.deepEqual(review(restored, true), discard ? [] : captured);
+        }, { targetOnly: true }));
     }
 
     async function changeWhileStopped(ctx, targetChange = 'edit') {

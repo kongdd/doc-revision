@@ -6415,7 +6415,10 @@ export class DiffTracker {
         this.pruneIgnoredImportedDirectoryWatchers();
         await this.resumeImportedDirectoryWatchers(epoch, version);
         if (!this.isCurrentEpoch(epoch) || version !== this.ignoreRefreshVersion) { return; }
-        if (this.isRecording || this.restoringEpoch === undefined || this.archiveRestoreTask) { this.pruneIgnoredTrackedChanges(); }
+        // Ordinary policy refreshes update future capture/action validation,
+        // but cannot discard or rewrite a stopped session's frozen review.
+        // Explicit scope Apply classifies retained/discarded reviews itself.
+        if (this.isRecording || this.archiveRestoreTask) { this.pruneIgnoredTrackedChanges(); }
         // Identity can recover without any rule text/fingerprint changing.
         // Reconcile only already-retained review resources, never discover new
         // paths or bypass pending explicit exclusions and hard boundaries.

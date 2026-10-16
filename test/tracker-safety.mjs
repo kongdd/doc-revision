@@ -5749,7 +5749,10 @@ registerStoppedReviewFreeze({
     test, Uri, DiffTracker, vscode, file, document, counters, pause, emitWatcher, waitUntil, watcherInstances,
     getTracker: () => tracker,
     setTracker: value => { tracker = value; },
-    setListedFiles: value => { listedFiles = value; }
+    setListedFiles: value => { listedFiles = value; },
+    setWatchExclude: value => { watchExclude = value; },
+    setVsCodeExcludes: value => { vscodeExcludes = value; },
+    fireConfigurationChanged: key => configurationChanged({affectsConfiguration: name => name === key})
 });
 
 registerStateSchemaCompatibility({
