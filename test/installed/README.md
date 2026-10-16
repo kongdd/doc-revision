@@ -94,7 +94,7 @@ Five sequential real VS Code processes use isolated temporary profiles:
 5. Same-ID candidate upgrade: preserve the actual workspace storage through
    installation, recover old text before-images, reconcile offline edits,
    preserve exclusion/exception behavior and observe a new external edit.
-   Shutdown writes V4 in legacy compatibility mode without scope migration.
+   Shutdown writes V5 in legacy compatibility mode without scope migration.
 
 The Changes tree is observed read-only through the disposable renderer's loopback
 CDP endpoint. Node filesystem edits do not open the physical document or invoke
