@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.7
+
+- Fix stopped Clear Diffs restoring obsolete imported-directory coverage warnings after reload. Preserve future recording coverage obligations and safely retire missing imported directories when a new baseline is established.
+- Freeze already-captured pending reviews when Recording stops, including after reload and ordinary ignore-setting refreshes. Post-Stop file changes are not added to the review; explicit Start establishes a fresh baseline. Keep/Revert/Acknowledge reject newer disk or dirty-editor edits without changing the frozen review.
+- Open stopped side-by-side comparisons with read-only snapshots. Previously opened Live File tabs remain live and are labelled accordingly.
+- Cancel older pending Start requests when Clear Diffs is confirmed, including asynchronous recovery/rebuild confirmations; cancelling Clear leaves Start requests untouched.
+- Persist stopped-review snapshots in Session V5. Older builds cannot read this format. Older stopped sessions without enough saved current-side evidence are preserved in an incomplete, paused state rather than reconstructed from later file contents. Do not remove recovery markers or mix primary and backup files to force a downgrade.
+
 ## 0.8.6
 
 - Keep windows without workspace folders idle, including restoration of recording sessions saved by older versions.
