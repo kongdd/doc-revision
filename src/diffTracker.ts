@@ -1112,7 +1112,9 @@ export class DiffTracker {
             : undefined;
         const watcherCoverageNeedsS4 = restoreSupplementalPlan?.issue;
         const missingStoppedReview = !state.isRecording && state.stoppedReviews === undefined && !failOnActivity &&
-            (state.fileSnapshots.length > 0 || state.opaqueBaselineFiles.length > 0 || state.unresolvedBaselineFiles.length > 0);
+            (state.fileSnapshots.length > 0 || state.opaqueBaselineFiles.length > 0 || state.unresolvedBaselineFiles.length > 0 ||
+                state.largeFileReminders.some(([, reminder]) => reminder.retainedReview ||
+                    !this.sameLargeObservation(reminder.observed, reminder.acknowledged)));
         const incomplete = missingStoppedReview || state.baselineState === 'building' || !rootsMatch || !scopeRootsMatch ||
             configuredScopeNeedsReconciliation || !!watcherCoverageNeedsS4;
         // Older versions could persist an active session with no folders.

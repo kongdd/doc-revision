@@ -486,4 +486,59 @@ export function registerStoppedReviewFreeze(h) {
         assert.equal(restored.getIsRecording(), false);
     }, { targetOnly: true }));
 
+
+    for (const reminderPending of [false, true]) for (const retainedReview of [false, true]) {
+        test(`STOP-FREEZE legacy V4 reminder-only ledger retains missing-review status (pending=${reminderPending}, retained=${retainedReview})`, () => fixture(async ctx => {
+            await ctx.stop();
+            const legacy = saved(ctx.storage);
+            legacy.version = 4;
+            delete legacy.stoppedReviews;
+            // V4 can record oversized-file metadata without any text, opaque,
+            // or unresolved before-image. Its independent ledger still carries
+            // pending observation changes and retained-review obligations.
+            legacy.fileSnapshots = [];
+            legacy.fileModes = [];
+            legacy.baselineExistingFiles = [];
+            legacy.opaqueBaselineFiles = [];
+            legacy.unresolvedBaselineFiles = [];
+            legacy.revertHistory = [];
+            const observed = { exists: true, size: 66 * 1024 * 1024 };
+            const acknowledged = reminderPending ? { exists: true, size: 65 * 1024 * 1024 } : { ...observed };
+            legacy.largeFileReminders = [[ctx.target, { observed, acknowledged, retainedReview }]];
+            assert.ok(ctx.tracker.parsePersistedState(legacy), 'the reminder-only legacy payload is valid');
+            fs.writeFileSync(ctx.target, 'unrecorded replacement after Stop\n');
+            fs.writeFileSync(ctx.newFile, 'unrecorded addition after Stop\n');
+            const missingReview = reminderPending || retainedReview;
+            const expected = missingReview ? 'incomplete' : 'restored';
+            let restored = await ctx.restart({ expected, beforeLoad: () => {
+                for (const name of stateFiles) fs.writeFileSync(path.join(ctx.storage, name), JSON.stringify(legacy));
+            } });
+            if (missingReview) {
+                assert.match(restored.getPersistenceIssue(), /older stopped session|pending review snapshots/i);
+            } else {
+                assert.equal(restored.getPersistenceIssue(), undefined,
+                    'an acknowledged-only metadata ledger has no missing pending review');
+            }
+            for (let reload = 0; reload < 2; reload++) {
+                if (reload > 0) { restored = await ctx.restart({ expected }); }
+                assert.equal(restored.getIsRecording(), false);
+                assert.equal(restored.getBaselineState(), missingReview ? 'building' : 'idle');
+                assert.deepEqual(review(restored), [], 'legacy metadata must not fabricate a stopped text snapshot');
+                assert.deepEqual([...restored.largeFileReminders], legacy.largeFileReminders,
+                    'preserve both acknowledged and observed identities plus the retained-review flag');
+                if (missingReview) { assert.ok(restored.getPersistenceIssue(), 'the incomplete warning survives reload'); }
+                assert.equal(await restored.flushPendingPersistence(), true);
+                const upgraded = saved(ctx.storage);
+                assert.equal(upgraded.version, 5);
+                assert.equal(upgraded.baselineState, missingReview ? 'building' : 'ready',
+                    'V5 upgrade must retain incomplete evidence on the next reload');
+                assert.deepEqual(upgraded.largeFileReminders, legacy.largeFileReminders);
+                assert.deepEqual(upgraded.stoppedReviews, []);
+                assert.equal(contents(ctx.target), 'unrecorded replacement after Stop\n');
+                assert.equal(contents(ctx.newFile), 'unrecorded addition after Stop\n');
+                assert.equal(watcherInstances.some(watcher => watcher.active), false);
+            }
+        }, { targetOnly: true }));
+    }
+
 }
