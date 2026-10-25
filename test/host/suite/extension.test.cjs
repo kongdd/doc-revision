@@ -62,7 +62,7 @@ module.exports = async function runExtensionHostScenario() {
         assert.equal((await state()).isRecording, true);
 
         // S3: a fresh workspace with no legacy Global watch rules adopts the
-        // default configured Rules scope before automatic recording starts.
+        // default configured Rules scope before the fixture explicitly starts recording.
         const configuredScope = await vscode.commands.executeCommand('diffTracker._testMonitoringScopeStatus');
         assert.equal(configuredScope.effective.kind, 'configured');
         assert.equal(configuredScope.effective.mode, 'rules');
