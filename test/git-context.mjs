@@ -208,7 +208,7 @@ test('production start blocks invalid monitoring scope configuration',async()=>{
             consented:false
         })},
         diffTracker:{
-            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',
+            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',getTrackedChanges:()=>[],
             startRecording:()=>{calls.push('start');return true;},setBaselineGitContexts:()=>calls.push('capture')
         },
         vscode:{workspace:vscode.workspace,commands:{executeCommand:async()=>{}},window:{showWarningMessage:async()=>undefined}}
@@ -237,7 +237,7 @@ test('production start revalidates scope after rebuild confirmation',async()=>{
         gitContextMonitor:{whenReady:async()=>true,isReady:()=>true,getSnapshots:()=>[]},
         monitoringScopeController:{getStatus:()=>status},
         diffTracker:{
-            isRecoveryBlocked:()=>true,getIsRecording:()=>false,getBaselineState:()=> 'idle',
+            isRecoveryBlocked:()=>true,getIsRecording:()=>false,getBaselineState:()=> 'idle',getTrackedChanges:()=>[],
             discardRecoveryState:async()=>{calls.push('discard');return true;},
             startRecording:()=>{calls.push('start');return true;},setBaselineGitContexts:()=>calls.push('capture')
         },
@@ -278,7 +278,7 @@ test('production start blocks reset Workspace scope when configured effective di
             consented:false
         })},
         diffTracker:{
-            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',
+            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',getTrackedChanges:()=>[],
             startRecording:()=>{calls.push('start');return true;},setBaselineGitContexts:()=>calls.push('capture')
         },
         vscode:{workspace:vscode.workspace,commands:{executeCommand:async()=>{}},window:{showWarningMessage:async()=>undefined}}
@@ -306,7 +306,7 @@ test('production start blocks an unapplied configured scope revision',async()=>{
             consented:true
         })},
         diffTracker:{
-            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',
+            isRecoveryBlocked:()=>false,getIsRecording:()=>false,getBaselineState:()=> 'idle',getTrackedChanges:()=>[],
             startRecording:()=>{calls.push('start');return true;},setBaselineGitContexts:()=>calls.push('capture')
         },
         vscode:{workspace:vscode.workspace,commands:{executeCommand:async()=>{}},window:{showWarningMessage:async()=>undefined}}
@@ -324,11 +324,11 @@ for(const scenario of ['fresh','stopped','restored']) test(`production activatio
     assert.equal(declarations.length,5);
     let release;const ready=new Promise(resolve=>{release=resolve;});const calls=[];let recording=scenario==='restored';
     const sandbox={restoreOutcome:scenario==='restored'?'restored':'absent',runningExtensionTests:true,
-        diffTracker:{isRecoveryBlocked:()=>false,getIsRecording:()=>recording,getBaselineState:()=> 'idle',
+        diffTracker:{isRecoveryBlocked:()=>false,getIsRecording:()=>recording,getBaselineState:()=> 'idle',getTrackedChanges:()=>[],
             startRecording:()=>{recording=true;calls.push('start');return true;},stopRecording:()=>{recording=false;calls.push('stop');},
             setBaselineGitContexts:()=>calls.push('capture'),reconcileRestoredGitContexts:()=>calls.push('reconcile'),
             setGitContextPending:()=>calls.push('release')},
-        gitContextMonitor:{whenReady:()=>ready,isReady:()=>true,getSnapshots:()=>[context()]},
+        gitContextMonitor:{setObserving:()=>{},whenReady:()=>ready,isReady:()=>true,getSnapshots:()=>[context()]},
         monitoringScopeController:{getStatus:()=>({
             requested:{ok:true,scope:{scopeRevision:'same'}},
             effective:{kind:'configured',scopeRevision:'same'},
@@ -368,6 +368,7 @@ for(const scenario of ['delayed','immediate','unavailable','recovered','incomple
         },
         GitContextMonitor:class {
             constructor(cb){callback=cb;}
+            setObserving(){}
             async start(){await starting;return scenario!=='unavailable';}
             isReady(){return scenario==='immediate';}
             getSnapshots(){return [];}
@@ -398,6 +399,24 @@ for(const outcome of ['ready','unavailable','dispose']) test(`AUDIT-25 readiness
     const starting=monitor.start();let finished=false;const ready=monitor.whenReady().then(result=>{finished=true;return result;});await Promise.resolve();assert.equal(finished,false);
     if(outcome==='dispose'){monitor.dispose();assert.equal(await ready,false);}release();await starting;
     assert.equal(await ready,outcome!=='dispose');monitor.dispose();
+});
+
+for (const outcome of ['absent', 'blocked', 'restored', 'recovered', 'incomplete']) {
+    for (const enabled of [false, true]) test(`startup auto-start policy ${outcome} opt-in=${enabled}`, async () => {
+        const source=ts.createSourceFile('extension.ts',fs.readFileSync(new URL('../src/extension.ts',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true);
+        const activation=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='activate');
+        const policy=activation.body.statements.find(node=>ts.isIfStatement(node)&&node.getText(source).includes('updateVisibleDecorations();')&&node.getText(source).includes('autoStartRecording'));
+        assert.ok(policy);
+        let starts=0;
+        const sandbox={restoreOutcome:outcome,updateVisibleDecorations(){},startRecordingFlow(){starts++;},
+            diffTracker:{getPersistenceIssue:()=>undefined},vscode:{workspace:{getConfiguration:()=>({get:()=>enabled})},window:{showWarningMessage(){}}}};
+        vm.runInNewContext(ts.transpileModule(policy.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
+        assert.equal(starts,outcome==='absent'&&enabled?1:0);
+    });
+}
+test('recording automation settings are opt-in in the manifest',()=>{
+    const manifest=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+    for(const name of ['autoStartRecording','promptOnGitBranchChange']) assert.equal(manifest.contributes.configuration.properties[`diffTracker.${name}`].default,false);
 });
 let failures=0;
 for(const {name,run} of tests){try{await run();console.log(`PASS ${name}`);}catch(error){failures++;console.error(`FAIL ${name}\n${error.stack}`);}}

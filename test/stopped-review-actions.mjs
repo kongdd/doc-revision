@@ -46,6 +46,59 @@ export function registerStoppedReviewActions(h) {
         }
     }
 
+    for (const action of ['file', 'block']) for (const change of ['branch', 'detached', 'operation', 'missing']) {
+        test(`STOP-ACTION ${action} Revert verifies silent Git ${change} on demand`, async () => {
+            const { tracker, target } = await stoppedText();
+            const a = { repoRoot: path.dirname(target), kind: 'repository', headName: 'main', headCommit: 'abc', detached: false, inProgress: false };
+            tracker.setBaselineGitContexts([a]);
+            tracker.setGitContextProvider(() => change === 'missing' ? [] : [{ ...a,
+                ...(change === 'branch' ? { headName: 'other' } : change === 'detached' ? { detached: true, headName: undefined } : { inProgress: true }) }]);
+            const before = snapshot(tracker);
+            const counts = { ...counters };
+            const result = action === 'file' ? await tracker.revertFile(target)
+                : await tracker.revertBlock(target, tracker.getChangeBlocks(target)[0].blockId);
+            assert.equal(result.status, 'conflict');
+            assert.match(result.reason, /Git|branch/i);
+            assert.deepEqual(snapshot(tracker), before);
+            assert.deepEqual(counters, counts);
+            assert.equal(fs.readFileSync(target, 'utf8'), reviewed);
+        });
+    }
+
+    test('STOP-ACTION silent branch switch refreshes Keep evidence without accepting the old token', async () => {
+        const { tracker, target } = await stoppedText();
+        const a = { repoRoot: path.dirname(target), kind: 'repository', headName: 'main', headCommit: 'abc', detached: false, inProgress: false };
+        tracker.setBaselineGitContexts([a]);
+        tracker.setGitContextProvider(() => [{ ...a, headName: 'other' }]);
+        assert.equal((await tracker.keepAllChangesInFile(target)).status, 'conflict');
+        assert.equal(tracker.getOriginalContent(target), baseline);
+        assert.equal((await tracker.keepAllChangesInFile(target)).status, 'success');
+        assert.equal(fs.readFileSync(target, 'utf8'), reviewed);
+    });
+
+    for (const kind of ['opaque', 'unknown']) {
+        test(`STOP-ACTION strict ${kind} acceptance verifies a silent branch switch`, async () => {
+            const tracker = getTracker();
+            const target = file(`stopped-git-${kind}.txt`);
+            seed(target, baseline);
+            if (kind === 'opaque') {
+                fs.writeFileSync(target, Buffer.from([0, 1, 2]));
+                await scan(target);
+            } else {
+                tracker.recordUnresolvedBaseline(target, 'Unknown before-image');
+            }
+            const a = { repoRoot: path.dirname(target), kind: 'repository', headName: 'main', headCommit: 'abc', detached: false, inProgress: false };
+            tracker.setBaselineGitContexts([a]);
+            tracker.stopRecording();
+            tracker.setGitContextProvider(() => [{ ...a, headName: 'other' }]);
+            const before = snapshot(tracker);
+            const result = kind === 'opaque' ? await tracker.acknowledgeOpaqueChange(target) : await tracker.resetUnknownBaseline(target);
+            assert.equal(result.status, 'conflict');
+            assert.match(result.reason, /branch/i);
+            assert.deepEqual(snapshot(tracker), before);
+        });
+    }
+
     test('STOP-ACTION successful partial Keep changes only the approved frozen block', async () => {
         const { tracker, target, storage } = await stoppedText();
         assert.equal(tracker.getChangeBlocks(target).length, 2);

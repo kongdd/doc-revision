@@ -212,6 +212,12 @@ export class GitContextMonitor implements vscode.Disposable {
     private disposed = false;
     private ready = false;
     private starting = false;
+    private observing = true;
+
+    /** Stop metadata sampling from background events; action verification stays available. */
+    public setObserving(observing: boolean): void {
+        this.observing = observing;
+    }
 
     constructor(
         private readonly onContextEvent: (event: GitContextEvent) => void,
@@ -317,7 +323,7 @@ export class GitContextMonitor implements vscode.Disposable {
     }
 
     private emitRepository(repository: GitRepositoryLike): void {
-        if (this.ready && !this.disposed && this.repositories.get(repository.rootUri.fsPath) === repository) {
+        if (this.observing && this.ready && !this.disposed && this.repositories.get(repository.rootUri.fsPath) === repository) {
             this.onContextEvent({ kind: 'changed', context: snapshotGitRepository(repository) });
         }
     }
@@ -326,7 +332,7 @@ export class GitContextMonitor implements vscode.Disposable {
         this.repositoryDisposables.get(repoRoot)?.forEach(disposable => disposable.dispose());
         this.repositoryDisposables.delete(repoRoot);
         const removed = this.repositories.delete(repoRoot);
-        if (removed && emit && this.ready && !this.disposed) { this.onContextEvent({ kind: 'removed', repoRoot }); }
+        if (this.observing && removed && emit && this.ready && !this.disposed) { this.onContextEvent({ kind: 'removed', repoRoot }); }
     }
 
     public getSnapshots(): GitContextSnapshot[] {

@@ -1437,7 +1437,7 @@ function commandHarness(options={}) {
         workspace:{workspaceFolders:[{uri:Uri.file('/workspace')}],getConfiguration:()=>({get:(_key,fallback)=>state.mode??fallback,inspect:key=>({workspaceValue:state.workspaceConfiguration?.[key]}),update:async(...args)=>state.updates.push(args)}),openTextDocument:async()=>{state.opened++;if(state.deleted)throw Object.assign(new Error('FileNotFound'),{code:'FileNotFound'});return{};}},
         window:{
             get activeTextEditor(){return state.activeTextEditor;},
-            showErrorMessage:()=>state.recoveryGate??'Discard Saved Session and Rebuild',
+            showErrorMessage:()=>{state.recoveryPrompts=(state.recoveryPrompts??0)+1;return state.recoveryGate??'Discard Saved Session and Rebuild';},
             showTextDocument:async()=>{},
             showQuickPick:async items=>{state.pickerItems=items;return items.find(item=>item.value===state.chooseMode);},
             showInformationMessage:m=>{state.archiveEvents.push('information');state.info.push(m);},
@@ -1449,6 +1449,7 @@ function commandHarness(options={}) {
                         state.archiveEvents.push('confirmation');
                         return Promise.resolve(state.onArchiveConfirmation?.()).then(()=>state.archiveAnswer);
                     }
+                    if(args.includes('Replace Review and Start')) return state.replaceAnswer ?? 'Replace Review and Start';
                     if(args.includes('Rebuild Baseline')) return state.rebuildGate??'Rebuild Baseline';
                     if(state.clearGate) return state.clearGate;
                     if(state.toggleRecordingOnConfirm) state.recording=!state.recording;
@@ -1471,6 +1472,7 @@ function commandHarness(options={}) {
         previewArchivedGitReview:async()=>{state.archiveEvents.push('preview');state.previews++;await state.archivePreviewGate;return state.archivePreview;},
         restoreArchivedGitReview:async token=>{state.archiveEvents.push('restore');state.restoreTokens.push(token);state.onArchiveRestore?.(token);await state.archiveRestoreGate;return state.archiveResult;}};
     const gitContextMonitor=state.noGitMonitor?undefined:{
+        setObserving:()=>{},
         whenReady:()=>state.gitGate??true,
         isReady:()=>{state.archiveEvents.push('ready');return state.gitReady;},
         getSnapshots:()=>{state.archiveEvents.push('snapshots');return state.gitSnapshots;}
@@ -2024,3 +2026,29 @@ await test('Clear rejected for changed recording state does not cancel pending S
 });
 
 console.log(`${count} production review UI cases passed (VS Code, DOM and renderer boundaries mocked).`);
+
+await test('Start while recording preserves the current baseline without confirmation', async () => {
+    const h = commandHarness({ recording: true });
+    assert.equal(await h.startFlow(), true);
+    assert.equal(h.state.starts, 0);
+    assert.equal(h.state.prompts.length, 0);
+});
+await test('Start with a stopped review preserves it when replacement is cancelled', async () => {
+    const h = commandHarness({ replaceAnswer: 'Cancel' });
+    assert.equal(await h.startFlow(), false);
+    assert.equal(h.state.starts, 0);
+    assert.equal(h.state.recording, false);
+    assert.equal(h.state.prompts.length, 1);
+});
+
+await test('Start recovery uses only its dedicated confirmation with pending review', async () => {
+    for (const answer of ['Cancel', 'Discard Saved Session and Rebuild']) {
+        const h = commandHarness({ recoveryBlocked: true, recoveryGate: answer, replaceAnswer: 'Cancel' });
+        const approved = answer === 'Discard Saved Session and Rebuild';
+        assert.equal(await h.startFlow(), approved);
+        assert.equal(h.state.recoveryPrompts, 1);
+        assert.equal(h.state.prompts.length, 0, 'do not ask to replace review again after recovery discard');
+        assert.equal(h.state.discards ?? 0, approved ? 1 : 0);
+        assert.equal(h.state.starts, approved ? 1 : 0);
+    }
+});

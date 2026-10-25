@@ -58,7 +58,7 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 - Rules / Whole Workspace 监控范围、本机范围扩展确认和有界准备
 - 统一范围管理器、监听覆盖诊断与独立 Recheck 恢复入口
 - Git 分支、detached HEAD、worktree 和冲突上下文改变时保留审阅，并限制回滚操作
-- 有效范围就绪后自动开始录制；重启后恢复未处理的变化
+- 新工作区默认保持停止；重启后恢复原有录制状态与未处理的变化
 - 监听有效范围内的文件变化，包括外部工具对磁盘文件的修改
 - 工作区相对路径分组、编辑器高亮、删除行徽标、CodeLens 和悬停说明
 - WebView 的统一 / 分栏、换行、展开和文件级操作，以及可配置的打开位置
@@ -68,7 +68,7 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 ## 使用方式
 
 1. 在 VS Code 左侧 Activity Bar 中打开 **Code Diff Tracker**。
-2. 有效范围和基线就绪后自动开始录制；新范围或范围扩展可能先需要本机确认。也可以手动执行：
+2. 执行 **Start Recording** 建立基线。新工作区默认保持停止；新范围或范围扩展可能先需要本机确认：
    - `Code Diff Tracker: Start Recording`
    - `Code Diff Tracker: Stop Recording`
    - `Code Diff Tracker: Toggle Recording`
@@ -390,3 +390,10 @@ V5 与仅读取 V4 或更早格式的构建不兼容，降级恢复会阻断，�
 ## License
 
 MIT
+
+### 录制默认行为
+
+- `diffTracker.autoStartRecording` 默认 `false`。开启后，仅无已保存会话的工作区自动开始录制，包括非 Git 文件夹；空白窗口保持空闲。原本正在录制的会话正常恢复，已停止的会话保持停止。
+- `diffTracker.promptOnGitBranchChange` 默认 `false`。开启后，仅在录制时提示归档重建，仍须显式确认，不会自动归档。停止后不提示，也不随 Git 后台事件读取分支快照。
+- Stop 冻结已有待审内容；查看不触发现场 Git 扫描。Keep/Revert 执行时仍核验 Git 上下文与文件版本。过期操作会被阻断，必要时从刷新后的审阅重新操作；Revert 不会把旧分支基线写入另一分支。
+- 正在录制时重复 Start 不重建基线。停止后再次 Start 会建立新基线；存在待审内容时先确认，取消则保留原审阅。损坏或不完整的会话保留到显式恢复。仓库归档重建要求正在录制并确认。Clear Diffs 保留独立确认；停止时仅清除保存的审阅，不扫描新基线。

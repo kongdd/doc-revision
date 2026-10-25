@@ -115,6 +115,16 @@ try {
     assert.equal(events.at(-1).kind, 'changed');
     assert.equal(events.at(-1).context.headName, 'hotfix');
 
+    monitor.setObserving(false);
+    const eventCount = events.length;
+    repo.state.HEAD = { name: 'stopped-branch', commit: 'ddd' };
+    stateChanged.fire();
+    assert.equal(events.length, eventCount, 'stopped changes stay silent');
+    assert.equal(monitor.getSnapshot(repoRoot).headName, 'stopped-branch', 'on-demand state remains available');
+    monitor.setObserving(true);
+    stateChanged.fire();
+    assert.equal(events.at(-1).context.headName, 'stopped-branch');
+
     repositories.splice(0, repositories.length);
     closed.fire(repo);
     assert.deepEqual(events.at(-1), { kind: 'removed', repoRoot });

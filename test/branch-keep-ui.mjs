@@ -279,14 +279,15 @@ for (const [reason, count, expected] of [
 ]) {
     const prompts = [];
     const sandbox = {
-        path: { sep: '/' }, runningExtensionTests: false,
+        path: { sep: '/' }, runningExtensionTests: false, recordingRequest: 0,
         gitPromptInFlight: new Set(), gitPromptShown: new Map(), persistGitPromptShown() {},
         diffTracker: {
+            getIsRecording: () => true,
             observeGitContext: () => reason,
             getReviewTokens: () => [{ filePath: '/repo/file.txt' }, { filePath: '/another/file.txt' }],
             getCrossBranchKeepCount: tokens => { assert.equal(tokens.length, 1); return count; }
         },
-        vscode: { window: { showWarningMessage: async (...args) => { prompts.push(args); } } }
+        vscode: { workspace: { getConfiguration: () => ({ get: () => true }) }, window: { showWarningMessage: async (...args) => { prompts.push(args); } } }
     };
     vm.runInNewContext(ts.transpileModule(`const ${gitEventHandler}; globalThis.handle = handleGitContextEvent;`, {
         compilerOptions: { target: ts.ScriptTarget.ES2022 }
@@ -303,3 +304,32 @@ for (const [reason, count, expected] of [
     assert.match(prompts[0][1].detail, /Revert remain[s]? blocked/);
 }
 console.log('PASS branch Keep UI: live monitor provider and eligible/unsafe Git alert copy');
+
+for (const recording of [false, true]) for (const enabled of [false, true]) {
+    let observations = 0, prompts = 0;
+    const sandbox = { runningExtensionTests: false, recordingRequest: 0, gitPromptInFlight: new Set(), gitPromptShown: new Map(), persistGitPromptShown() {},
+        diffTracker: { getIsRecording: () => recording, observeGitContext: () => { observations++; return 'Git branch changed from main to next'; } },
+        vscode: { workspace: { getConfiguration: () => ({ get: () => enabled }) }, window: { showWarningMessage: async () => { prompts++; } } } };
+    vm.runInNewContext(ts.transpileModule(`const ${gitEventHandler}; globalThis.handle = handleGitContextEvent;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, sandbox);
+    await sandbox.handle({ kind: 'changed', context: { repoRoot: '/repo' } });
+    assert.equal(observations, recording ? 1 : 0);
+    assert.equal(prompts, recording && enabled ? 1 : 0);
+}
+console.log('PASS branch prompt opt-in and stopped silence');
+
+for (const transition of ['stop', 'restart', 'disable']) {
+    let answer, rebuilt = 0, recording = true, enabled = true;
+    const sandbox = { recordingRequest: 0, runningExtensionTests: false, gitPromptInFlight: new Set(), gitPromptShown: new Map(), persistGitPromptShown() {},
+        diffTracker: { getIsRecording: () => recording, observeGitContext: () => 'Git branch changed from main to next' },
+        rebuildGitBaseline: async () => { rebuilt++; },
+        vscode: { workspace: { getConfiguration: () => ({ get: () => enabled }) }, window: { showWarningMessage: () => new Promise(resolve => { answer = resolve; }) } } };
+    vm.runInNewContext(ts.transpileModule(`const ${gitEventHandler}; globalThis.handle = handleGitContextEvent;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, sandbox);
+    const pending = sandbox.handle({ kind: 'changed', context: { repoRoot: '/repo' } });
+    if (transition === 'stop') recording = false;
+    if (transition === 'restart') sandbox.recordingRequest++;
+    if (transition === 'disable') enabled = false;
+    answer('Archive and Rebuild');
+    await pending;
+    assert.equal(rebuilt, 0, transition);
+}
+console.log('PASS pending Git prompt cannot rebuild after stop, restart, or setting disable');
