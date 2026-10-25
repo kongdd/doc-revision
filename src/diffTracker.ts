@@ -498,6 +498,17 @@ export class DiffTracker {
 
     private queueRecoveryAction<T>(action: () => Promise<T>): Promise<T> {
         const operation = this.recoveryActionQueue.then(async () => {
+            // Stopped Git events are silent. Reconcile an existing pause only at
+            // the boundary of a new explicit action, before it becomes in-flight.
+            // observeGitContext retains all transaction/recovery gates; a write
+            // that already observed an incompatible branch must still abort.
+            if (!this.isRecording && this.pausedGitRepositories.size > 0) {
+                let contexts: GitContextSnapshot[] | undefined;
+                try { contexts = this.gitContextProvider?.(); } catch { /* Unverified stays paused. */ }
+                for (const context of contexts ?? []) {
+                    if (this.pausedGitRepositories.has(context.repoRoot)) { this.observeGitContext(context); }
+                }
+            }
             this.recoveryActionRunning = true;
             try { return await action(); }
             finally {
