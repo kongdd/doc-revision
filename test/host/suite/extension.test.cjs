@@ -62,7 +62,7 @@ module.exports = async function runExtensionHostScenario() {
         assert.equal((await state()).isRecording, true);
 
         // S3: a fresh workspace with no legacy Global watch rules adopts the
-        // default configured Rules scope before automatic recording starts.
+        // default configured Rules scope before the fixture explicitly starts recording.
         const configuredScope = await vscode.commands.executeCommand('diffTracker._testMonitoringScopeStatus');
         assert.equal(configuredScope.effective.kind, 'configured');
         assert.equal(configuredScope.effective.mode, 'rules');
@@ -806,8 +806,13 @@ module.exports = async function runExtensionHostScenario() {
             } else if (operation === 'repository rebuild') {
                 assert.equal(await vscode.commands.executeCommand('diffTracker._testRebuildGitBaseline', pausedRepository.repoRoot), true);
             } else {
+                // Finish the preceding fixture review before public Start; pending
+                // review replacement now correctly requires interactive confirmation.
+                assert.equal((await vscode.commands.executeCommand('diffTracker.acceptFile',
+                    uri('dist/s4b-blind/changed.txt').fsPath)).status, 'success');
+                assert.equal((await state()).trackedChanges.length, 0);
                 await vscode.commands.executeCommand('diffTracker.stopRecording');
-                await vscode.commands.executeCommand('diffTracker.startRecording');
+                assert.equal(await vscode.commands.executeCommand('diffTracker.startRecording'), true);
             }
             await untilStable(`S4-B ${operation} baseline`, async () => (await state()).baselineState === 'ready');
             const content = `s4b after ${operation}\n`;

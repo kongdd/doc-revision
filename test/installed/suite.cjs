@@ -83,6 +83,16 @@ async function scenario(phase, report) {
     report.productionActivation = true;
     report.vscodeVersion = vscode.version;
     assert.deepEqual(contents(), beforeActivation, 'activation/recovery must never alter workspace file bytes');
+    if (phase === 'candidate-first-install') {
+        assert.equal(vscode.workspace.getConfiguration('diffTracker').get('autoStartRecording'), false);
+        if (fs.existsSync(report.statePath)) {
+            const idle = JSON.parse(fs.readFileSync(report.statePath, 'utf8'));
+            assert.equal(idle.isRecording, false, 'fresh installed session stays stopped by default');
+            assert.equal(idle.fileSnapshots.length, 0, 'activation does not build a fresh baseline');
+        }
+        assert.equal(await vscode.commands.executeCommand('diffTracker.startRecording'), true);
+    }
+
 
     const until = async (description, predicate, milliseconds = 20_000) => {
         const deadline = Date.now() + milliseconds;
@@ -227,5 +237,7 @@ async function scenario(phase, report) {
         ? (prepared ? 'excluded edit before upgrade\n' : 'excluded edit after candidate upgrade\n') : BASE['legacy-excluded.txt']);
     if (!legacy) { assert.deepEqual(read('opaque.bin'), OPAQUE_EDIT); }
     report.recording = phase !== 'candidate-recording-reload' && !stopped;
-    report.observations.push('No Clear/Start/Rebuild/Revert/migration commands used; accepted baseline and workspace bytes preserved');
+    report.observations.push(phase === 'candidate-first-install'
+        ? 'Explicit public Start initialized the fresh baseline; no recovery phase was reset'
+        : 'No Clear/Start/Rebuild/Revert/migration commands used; accepted baseline and workspace bytes preserved');
 }

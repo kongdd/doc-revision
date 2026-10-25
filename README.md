@@ -81,7 +81,7 @@ The project retains the MIT license and upstream attribution. The Marketplace ex
 ## Usage
 
 1. Open **Code Diff Tracker** from the Activity Bar.
-2. Recording starts automatically when the effective scope and baseline are ready. A new or expanded scope may need local confirmation first.
+2. Choose **Start Recording** to build a baseline. New workspaces stay stopped by default. A new or expanded scope may need local confirmation first.
 3. Edit files in your workspace.
 4. In **Change Recording**, select a changed file to open the configured review view.
 5. Use the context menu or editor title actions to open:
@@ -157,6 +157,12 @@ Code Diff Tracker rejects an action when the displayed review is stale, the base
 Baseline growth and Keep operations must be persisted before review actions resume.
 
 ### Git context changes
+
+`diffTracker.autoStartRecording` defaults to `false`. Opting in starts only workspaces without a saved session (including non-Git folders); empty windows remain idle. Previously recording sessions resume normally; saved stopped sessions remain stopped. Damaged or incomplete sessions are preserved for explicit recovery through Start.
+
+`diffTracker.promptOnGitBranchChange` defaults to `false`. While recording, enabling it permits an Archive and Rebuild prompt after a Git context change; it never archives automatically. Stop suppresses these prompts and background Git snapshot sampling. Existing review remains frozen and viewable. Keep/Revert still verify live Git context and current file contents when invoked; a stale action may require retrying from the refreshed review. Revert cannot write an old branch's baseline into another branch.
+
+Start while already recording is a no-op. Starting again from a stopped session builds a new baseline and asks before replacing pending review. Cancel leaves the review intact. Repository Archive and Rebuild requires recording and explicit confirmation. Clear Diffs retains its separate explicit confirmation; while stopped it clears saved review without scanning a new baseline.
 
 Fresh recording waits for the VS Code Git API to become ready before establishing the Git baseline. If a repository later changes branch, detached HEAD, worktree identity, or enters an unstable merge/rebase state, existing review data is preserved, while Revert and Undo actions for that repository pause. Returning to a compatible Git context automatically revalidates the live repository before resuming future review actions. Existing before-images, pending reviews and Undo records are retained; an in-flight action that observed the incompatible context is not revived. **Archive and Rebuild Paused Git Baseline** explicitly starts a new baseline, rather than unlocking the existing review.
 

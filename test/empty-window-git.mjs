@@ -21,7 +21,7 @@ function wiring(tracker, vscode, snapshot) {
         gitPromptInFlight: new Set(), gitPromptShown: new Map(), persistGitPromptShown() {},
         refreshReview() {}, recordingRequest: 0,
         gitContextMonitor: { getSnapshot: () => snapshot },
-        vscode: { ...vscode, window: {
+        vscode: { ...vscode, workspace: { ...vscode.workspace, getConfiguration: () => ({ get: () => true }) }, window: {
             showWarningMessage: async (...args) => { prompts.push(args); return args[1]?.modal ? 'Archive and Rebuild' : undefined; },
             showInformationMessage() {}
         } }

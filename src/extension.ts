@@ -137,6 +137,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let recordingRequest = 0;
     const startRecordingFlow = async (): Promise<boolean> => {
+        if (diffTracker.getIsRecording()) { return true; }
         const request = ++recordingRequest;
         // Empty windows have no supported monitoring scope or baseline to recover.
         if (!vscode.workspace.workspaceFolders?.some(folder => folder.uri.scheme === 'file')) { return false; }
@@ -187,6 +188,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 'Rebuild Baseline'
             );
             if (request !== recordingRequest || answer !== 'Rebuild Baseline') { return false; }
+        } else if (diffTracker.getTrackedChanges().length > 0) {
+            const answer = await vscode.window.showWarningMessage(
+                'Starting a new recording replaces the stopped review with a new baseline. Keep or revert pending changes first if you need this review.',
+                { modal: true }, 'Replace Review and Start'
+            );
+            if (request !== recordingRequest || answer !== 'Replace Review and Start') { return false; }
         }
 
         // A recovery/rebuild confirmation can remain open while Workspace
@@ -208,6 +215,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return false;
         }
 
+        if (diffTracker.getIsRecording()) { return true; }
         return startRecordingAfterPrechecks();
     };
 
@@ -217,12 +225,14 @@ export async function activate(context: vscode.ExtensionContext) {
         if (gitContextMonitor?.isReady()) {
             diffTracker.setBaselineGitContexts(gitContextMonitor.getSnapshots());
         }
+        gitContextMonitor?.setObserving(true);
         setRecordingContext(started);
         return started;
     };
 
     const stopRecordingFlow = () => {
         ++recordingRequest;
+        gitContextMonitor?.setObserving(false);
         diffTracker.stopRecording();
         setRecordingContext(false);
     };
@@ -349,6 +359,11 @@ export async function activate(context: vscode.ExtensionContext) {
         contextSnapshot?: GitContextSnapshot,
         confirmed = false
     ): Promise<boolean> => {
+        if (!diffTracker.getIsRecording()) {
+            void vscode.window.showWarningMessage('Code Diff Tracker: Start recording before rebuilding a baseline. The stopped review is preserved.');
+            return false;
+        }
+        const request = recordingRequest;
         const snapshot = contextSnapshot ?? gitContextMonitor?.getSnapshot(repoRoot);
         if (!snapshot) {
             void vscode.window.showWarningMessage('Code Diff Tracker: The Git repository is unavailable; its preserved review remains paused.');
@@ -366,6 +381,7 @@ export async function activate(context: vscode.ExtensionContext) {
             );
             if (answer !== 'Archive and Rebuild') { return false; }
         }
+        if (request !== recordingRequest || !diffTracker.getIsRecording()) { return false; }
         const currentSnapshot = gitContextMonitor?.getSnapshot(repoRoot);
         if (!currentSnapshot || currentSnapshot.inProgress) { return false; }
         const rebuilt = await diffTracker.rebuildRepositoryBaseline(repoRoot, currentSnapshot);
@@ -389,6 +405,7 @@ export async function activate(context: vscode.ExtensionContext) {
             diffTracker.setGitContextPending(false);
             return;
         }
+        if (!diffTracker.getIsRecording()) { return; }
         const repoRoot = event.kind === 'changed' ? event.context.repoRoot : event.repoRoot;
         const reason = event.kind === 'changed'
             ? diffTracker.observeGitContext(event.context)
@@ -398,7 +415,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 gitPromptShown.delete(repoRoot)) { persistGitPromptShown(); }
             return;
         }
+        if (!vscode.workspace.getConfiguration('diffTracker').get<boolean>('promptOnGitBranchChange', false)) { return; }
         if (runningExtensionTests || gitPromptInFlight.has(repoRoot) || gitPromptShown.get(repoRoot) === reason) { return; }
+        const request = recordingRequest;
         gitPromptInFlight.add(repoRoot);
         gitPromptShown.set(repoRoot, reason);
         persistGitPromptShown();
@@ -416,7 +435,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     : 'The existing review is preserved. Closing this message keeps it paused. Keep / Accept and Revert remain blocked for unsafe Git contexts.' },
                 'Archive and Rebuild'
             );
-            if (answer === 'Archive and Rebuild') {
+            if (answer === 'Archive and Rebuild' && request === recordingRequest && diffTracker.getIsRecording() &&
+                vscode.workspace.getConfiguration('diffTracker').get<boolean>('promptOnGitBranchChange', false)) {
                 await rebuildGitBaseline(repoRoot, event.kind === 'changed' ? event.context : undefined, true);
                 if (!diffTracker.getPausedGitRepositories().some(item => item.repoRoot === repoRoot) &&
                     gitPromptShown.delete(repoRoot)) { persistGitPromptShown(); }
@@ -1358,11 +1378,18 @@ export async function activate(context: vscode.ExtensionContext) {
             // Baseline startup/recovery can fail asynchronously after Start
             // returned. Keep command visibility projected from the backend's
             // current state rather than from the user's earlier intent.
+            gitContextMonitor?.setObserving(diffTracker.getIsRecording());
             setRecordingContext(diffTracker.getIsRecording());
         })
     );
 
+    context.subscriptions.push(diffTracker.onDidChangeRecordingState(recording => {
+        gitContextMonitor?.setObserving(recording);
+        setRecordingContext(recording);
+    }));
+
     gitContextMonitor = new GitContextMonitor(event => { void handleGitContextEvent(event); });
+    gitContextMonitor.setObserving(diffTracker.getIsRecording());
     context.subscriptions.push(gitContextMonitor);
     const gitContextAvailable = await gitContextMonitor.start();
     if (gitContextAvailable && gitContextMonitor.isReady()) {
@@ -1373,7 +1400,7 @@ export async function activate(context: vscode.ExtensionContext) {
     } else if (!gitContextAvailable) {
         diffTracker.setGitContextPending(false);
     }
-    if (!gitContextAvailable && !runningExtensionTests &&
+    if (!gitContextAvailable && diffTracker.getIsRecording() && !runningExtensionTests &&
         vscode.workspace.workspaceFolders?.some(folder => folder.uri.scheme === 'file')) {
         void vscode.window.showWarningMessage(
             'Code Diff Tracker: Git context monitoring is unavailable. Ordinary review continues, but branch/worktree safety detection is disabled.'
@@ -1390,9 +1417,8 @@ export async function activate(context: vscode.ExtensionContext) {
         } else if (restoreOutcome === 'incomplete') {
             void vscode.window.showWarningMessage(diffTracker.getPersistenceIssue() ?? 'Code Diff Tracker restored the review in paused mode. Rebuild the baseline before review actions.');
         }
-    } else if (restoreOutcome === 'blocked') {
-        void startRecordingFlow();
-    } else {
+    } else if (restoreOutcome === 'absent' &&
+        vscode.workspace.getConfiguration('diffTracker').get<boolean>('autoStartRecording', false)) {
         void startRecordingFlow();
     }
 

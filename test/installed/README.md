@@ -99,7 +99,9 @@ Five sequential real VS Code processes use isolated temporary profiles:
 The Changes tree is observed read-only through the disposable renderer's loopback
 CDP endpoint. Node filesystem edits do not open the physical document or invoke
 Recheck. Public Native Review snapshots verify before/current content. Session
-JSON is read, never seeded or edited. No Clear, Start, Rebuild, Revert or migration
+JSON is read, never seeded or edited. Only candidate first install explicitly uses
+public Start to initialize its fresh baseline. Reload and upgrade do not use Start
+to manufacture recovery. No Clear, Rebuild, Revert or migration
 command manufactures a recovery result. Primary/unsaved/archive checks and exact
 fixture bytes guard against destructive fallback.
 

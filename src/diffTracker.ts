@@ -498,6 +498,17 @@ export class DiffTracker {
 
     private queueRecoveryAction<T>(action: () => Promise<T>): Promise<T> {
         const operation = this.recoveryActionQueue.then(async () => {
+            // Stopped Git events are silent. Reconcile an existing pause only at
+            // the boundary of a new explicit action, before it becomes in-flight.
+            // observeGitContext retains all transaction/recovery gates; a write
+            // that already observed an incompatible branch must still abort.
+            if (!this.isRecording && this.pausedGitRepositories.size > 0) {
+                let contexts: GitContextSnapshot[] | undefined;
+                try { contexts = this.gitContextProvider?.(); } catch { /* Unverified stays paused. */ }
+                for (const context of contexts ?? []) {
+                    if (this.pausedGitRepositories.has(context.repoRoot)) { this.observeGitContext(context); }
+                }
+            }
             this.recoveryActionRunning = true;
             try { return await action(); }
             finally {
@@ -9810,7 +9821,7 @@ export class DiffTracker {
     }
 
     private validateActionTarget(filePath: string): string | undefined {
-        return this.validateActionReadiness() ?? this.validateSnapshotTarget(filePath);
+        return this.validateActionReadiness() ?? this.validateLiveGitTarget(filePath) ?? this.validateSnapshotTarget(filePath);
     }
 
     private validateRevertTarget(filePath: string): string | undefined {
@@ -9818,6 +9829,25 @@ export class DiffTracker {
         return error?.startsWith('Git branch changed from ')
             ? `Revert blocked because the branch differs from the recorded baseline. ${error.split(';')[0]}. Verified text Keep may still be available.`
             : error;
+    }
+
+    /** Workspace writes require live strict identity, even when stopped events are silent. */
+    private validateLiveGitTarget(filePath: string): string | undefined {
+        if (!this.gitContextProvider) { return undefined; }
+        let contexts: GitContextSnapshot[] | undefined;
+        try { contexts = this.gitContextProvider(); } catch { /* Fail closed. */ }
+        const owner = this.getRepositoryOwner(filePath);
+        if (!contexts) { return owner ? 'Git context cannot be verified; retry when Git is ready' : undefined; }
+        const current = contexts.filter(context => this.pathBelongsToRoot(filePath, context.repoRoot))
+            .sort((a, b) => b.repoRoot.length - a.repoRoot.length)[0];
+        if (!owner && !current) { return undefined; }
+        const baseline = owner ? this.baselineGitContexts.get(owner) : undefined;
+        if (!baseline || !current || current.repoRoot !== owner) {
+            return 'Git repository/worktree ownership is missing or changed';
+        }
+        if (!this.isRecording) { this.latestGitContexts.set(owner!, { ...current }); }
+        const comparison = compareGitContexts(baseline, current);
+        return comparison.compatible ? undefined : comparison.reason ?? 'Git context changed';
     }
 
     private gitContextProvider: (() => GitContextSnapshot[] | undefined) | undefined;
@@ -9852,6 +9882,9 @@ export class DiffTracker {
         if (!baseline || !current || current.repoRoot !== owner) {
             return result('Git repository/worktree ownership is missing or changed');
         }
+        // An explicit stopped action refreshes its UI evidence on demand. A token
+        // from before this observation still fails the signature check and must be retried.
+        if (!this.isRecording) { this.latestGitContexts.set(owner!, { ...current }); }
         const strict = compareGitContexts(baseline, current);
         const paused = this.getGitPauseReason(filePath);
         if (!strict.compatible || paused) {
@@ -10871,7 +10904,7 @@ export class DiffTracker {
     private beginAcknowledgeTransaction(
         filePath: string, review: OpaqueReviewToken | UnknownReviewToken, approved: CurrentFileState,
         kind: 'opaque' | 'unknown' = 'opaque',
-        targetGuard: () => boolean = () => !this.validateSnapshotTarget(filePath)
+        targetGuard: () => boolean = () => !this.validateLiveGitTarget(filePath) && !this.validateSnapshotTarget(filePath)
     ): BaselineTransaction {
         const recovery = this.captureBaselineAcceptanceRecovery(!!this.storageUri);
         const approvedChange = this.trackedChanges.get(filePath);
@@ -11048,7 +11081,7 @@ export class DiffTracker {
         // Folder and mixed batches omit this opt-in and retain strict Git guards.
         const targetGuard = options?.allowCrossBranch
             ? () => this.validateSelectedOpaqueTarget(filePath, token?.gitContextSignature)
-            : () => this.validateSnapshotTarget(filePath);
+            : () => this.validateLiveGitTarget(filePath) ?? this.validateSnapshotTarget(filePath);
         return this.queueRecoveryAction(() => this.queueOpaqueFileAction(
             filePath,
             token,

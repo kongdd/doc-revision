@@ -5345,9 +5345,9 @@ test('Issue #28 production pause producer and reactivation gate preserve one not
     let promptCount=0;
     const createHost=()=>{
         const sandbox={
-            context:{workspaceState},diffTracker:tracker,runningExtensionTests:false,
+            context:{workspaceState},diffTracker:tracker,runningExtensionTests:false,recordingRequest:0,
             gitContextMonitor:{},
-            vscode:{window:{showWarningMessage:()=>{
+            vscode:{workspace:{getConfiguration:()=>({get:()=>true})},window:{showWarningMessage:()=>{
                 promptCount++;
                 return new Promise(resolve=>pending.push(resolve));
             }}},

@@ -119,6 +119,9 @@ module.exports = async function nativeReviewCheckpoint() {
         assert.equal(read(name), expected);
         return document;
     };
+    assert.equal(vscode.workspace.getConfiguration('diffTracker').get('autoStartRecording'), false);
+    assert.equal((await state()).isRecording, false, 'fresh workspace stays stopped by default');
+    assert.equal(await vscode.commands.executeCommand('diffTracker.startRecording'), true);
     await until('initial Ready baseline', async () => (await state()).baselineState === 'ready');
     const initial = await state();
     assert.equal(initial.isRecording, true);

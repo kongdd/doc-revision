@@ -38,6 +38,9 @@ exports.run = async () => {
         const path = require('node:path');
         const vscode = require('vscode');
         await vscode.extensions.getExtension('lengmh.code-diff-tracker').activate();
+        assert.equal((await vscode.commands.executeCommand('diffTracker._testState')).isRecording, false,
+            'fresh prepare session must remain stopped until explicitly started');
+        assert.equal(await vscode.commands.executeCommand('diffTracker.startRecording'), true);
         let initial;
         const deadline = Date.now() + 30_000;
         do {

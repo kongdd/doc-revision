@@ -2,7 +2,7 @@
   "name": "code-diff-tracker",
   "displayName": "Code Diff Tracker",
   "description": "Review, keep, and safely revert workspace file changes in real time",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "publisher": "lengmh",
   "author": "TinyTigerPan (Fork from Wizyoung)",
   "license": "MIT",
@@ -245,6 +245,18 @@
           "default": false,
           "scope": "window",
           "description": "Opt in to the Code Diff Tracker Quick Diff provider. Its menu opens a read-only, version-bound Native Review snapshot; it does not apply unversioned Quick Diff hunks."
+        },
+        "diffTracker.promptOnGitBranchChange": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "While recording, prompt to archive and rebuild after a Git context change. Never archives automatically or prompts while stopped."
+        },
+        "diffTracker.autoStartRecording": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Start recording in a new workspace with no saved session. Saved stopped sessions remain stopped; active sessions resume normally."
         }
       }
     },

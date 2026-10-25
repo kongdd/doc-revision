@@ -92,7 +92,9 @@ export class SettingsTreeDataProvider implements vscode.TreeDataProvider<Setting
             id: 'recording',
             label: 'Recording',
             items: [
-                { key: 'onlyTrackAutomatedChanges', label: 'Vibe Coding Only' }
+                { key: 'onlyTrackAutomatedChanges', label: 'Vibe Coding Only' },
+                { key: 'promptOnGitBranchChange', label: 'Prompt on Git branch change', defaultValue: false },
+                { key: 'autoStartRecording', label: 'Auto-start new workspaces', defaultValue: false }
             ]
         },
         {

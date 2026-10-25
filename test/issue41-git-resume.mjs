@@ -19,6 +19,59 @@ export function registerIssue41GitResume(h) {
         const observe = context => { live = [context]; return tracker.observeGitContext(context); };
         await run({ tracker, target, a, b, observe, setLive: value => { live = value; } });
     }
+    for (const action of ['revert', 'undo', 'opaque', 'unknown']) {
+        test(`ISSUE41-GIT stopped return to baseline branch permits first ${action} action`, () => fixture(async ctx => {
+            const { tracker, target, a, b, observe, setLive } = ctx;
+            if (action === 'undo') {
+                assert.equal((await tracker.revertFile(target)).status, 'success');
+            } else if (action === 'opaque') {
+                fs.writeFileSync(target, Buffer.from([0, 1, 2]));
+                await scan(target);
+            } else if (action === 'unknown') {
+                tracker.recordUnresolvedBaseline(target, 'Before-image requires explicit reset');
+            }
+            const before = {
+                baseline: tracker.getOriginalContent(target),
+                reviews: JSON.stringify(tracker.getTrackedChanges()),
+                history: JSON.stringify(tracker.revertHistory),
+                bytes: fs.readFileSync(target)
+            };
+            observe(b);
+            assert.ok(tracker.getGitPauseReason(target));
+            tracker.stopRecording();
+            setLive([a]); // No return event: stopped Git observation remains silent.
+            assert.ok(tracker.getGitPauseReason(target), 'the cached pause remains until an explicit action');
+            assert.equal(tracker.getOriginalContent(target), before.baseline);
+            assert.equal(JSON.stringify(tracker.getTrackedChanges()), before.reviews);
+            assert.equal(JSON.stringify(tracker.revertHistory), before.history);
+            assert.deepEqual(fs.readFileSync(target), before.bytes);
+
+            const result = action === 'revert' ? await tracker.revertFile(target)
+                : action === 'undo' ? await tracker.undoLastRevert()
+                : action === 'opaque' ? await tracker.acknowledgeOpaqueChange(target)
+                : await tracker.resetUnknownBaseline(target);
+            if (action === 'undo') {
+                assert.equal(result.succeeded, 1, JSON.stringify(result));
+                assert.equal(result.failed, 0);
+                assert.equal(fs.readFileSync(target, 'utf8'), 'pending\n');
+                assert.equal(tracker.getOriginalContent(target), 'before\n');
+                assert.equal(tracker.getTrackedChange(target).currentContent, 'pending\n');
+            } else {
+                assert.equal(result.status, 'success', JSON.stringify(result));
+                assert.equal(tracker.getTrackedChange(target), undefined);
+                if (action === 'revert') {
+                    assert.equal(fs.readFileSync(target, 'utf8'), 'before\n');
+                    assert.equal(tracker.getOriginalContent(target), 'before\n');
+                } else {
+                    assert.deepEqual(fs.readFileSync(target), before.bytes, 'acceptance must not write workspace bytes');
+                    if (action === 'opaque') assert.equal(tracker.opaqueBaselineFiles.has(target), true);
+                    else assert.equal(tracker.getOriginalContent(target), 'pending\n');
+                }
+            }
+            assert.equal(tracker.getGitPauseReason(target), undefined);
+            assert.equal(tracker.getIsRecording(), false);
+        }));
+    }
     for (const transition of ['branch', 'operation', 'removed']) {
         test(`ISSUE41-GIT resume ${transition} preserves baseline, pending and Undo`, () => fixture(async ctx => {
             const { tracker, target, a, b, observe } = ctx;
