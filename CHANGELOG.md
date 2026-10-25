@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.8
+
+- Make automatic recording in new workspaces and Git branch archive/rebuild prompts opt-in through `diffTracker.autoStartRecording` and `diffTracker.promptOnGitBranchChange`, both disabled by default.
+- Keep stopped reviews quiet: stop background Git snapshot sampling and branch prompts, preserve saved stopped sessions, and defer new baselines and recovery confirmations to explicit Start. Saved recording sessions continue to restore normally.
+- Preserve pending review when Start is cancelled, avoid duplicate Start and recovery prompts, and reject archive prompts that became stale after Stop or restart.
+- Verify repository, branch and file content at review mutation time while stopped. Reconcile a previously paused session at the next explicit action after returning to its baseline branch, retaining in-flight transaction safety checks.
+
 ## 0.8.7
 
 - Fix stopped Clear Diffs restoring obsolete imported-directory coverage warnings after reload. Preserve future recording coverage obligations and safely retire missing imported directories when a new baseline is established.
