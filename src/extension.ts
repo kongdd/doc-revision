@@ -590,6 +590,10 @@ export async function activate(context: vscode.ExtensionContext) {
             const originalUri = currentUri.with({ scheme: 'diff-tracker-original' });
 
             const fileName = displayFileName(filePath);
+            if (canOpen) {
+                await Promise.all([vscode.workspace.openTextDocument(originalUri), vscode.workspace.openTextDocument(currentUri)]);
+                if (!canOpen()) { return; }
+            }
 
             await vscode.commands.executeCommand('vscode.diff',
                 originalUri,

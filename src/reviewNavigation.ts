@@ -16,7 +16,7 @@ export async function withReviewNavigation(
     let switched = false;
     const listener = vscode.window.onDidChangeActiveTextEditor(() => { switched = true; });
     const tabListener = vscode.window.tabGroups?.onDidChangeTabs(event => {
-        if (event.changed.some(changed => changed.isActive && changed !== tab)) { switched = true; }
+        if ([...event.opened, ...event.changed].some(changed => changed.isActive && changed !== tab)) { switched = true; }
     });
     const groupListener = vscode.window.tabGroups?.onDidChangeTabGroups(() => {
         if (vscode.window.tabGroups.activeTabGroup.activeTab !== tab) { switched = true; }

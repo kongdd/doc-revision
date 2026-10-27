@@ -2078,7 +2078,7 @@ for(const scenario of ['success','disabled','failed','conflict','cancelled','rem
 }
 
 
-for(const mode of ['original','inline','splitOriginalWebview'])await test(`auto-next rechecks focus after ${mode} document loading`,async()=>{
+for(const mode of ['original','inline','splitOriginalWebview','sideBySide','nativeReview'])await test(`auto-next rechecks focus after ${mode} document loading`,async()=>{
     const h=harness(null);h.state.configuration.autoOpenNextPendingFile=true;
     let editorListener;h.vscode.window.activeTextEditor={};
     h.vscode.window.onDidChangeActiveTextEditor=fn=>{editorListener=fn;return{dispose(){}};};
@@ -2088,21 +2088,51 @@ for(const mode of ['original','inline','splitOriginalWebview'])await test(`auto-
     h.vscode.workspace.openTextDocument=async()=>{loading.resolve();await release.promise;return{};};
     h.vscode.window.showTextDocument=async()=>{shown++;return{};};
     const source=ts.createSourceFile('extension.ts',fs.readFileSync('src/extension.ts','utf8'),ts.ScriptTarget.Latest,true);
-    const names=new Set(['openDiffDefault','openOriginalFile','showInlineDiff','showOriginalAndWebviewSplit'].map(name=>'diffTracker.'+name));
+    const names=new Set(['openDiffDefault','openOriginalFile','showInlineDiff','showOriginalAndWebviewSplit','showSideBySideDiff'].map(name=>'diffTracker.'+name));
     const entries=[];function visit(node){
         if(ts.isCallExpression(node)&&node.expression.getText(source)==='vscode.commands.registerCommand'&&names.has(node.arguments[0]?.text))
             entries.push(`${JSON.stringify(node.arguments[0].text)}:${node.arguments[1].getText(source)}`);
         ts.forEachChild(node,visit);
     }visit(source);
-    const sandbox={vscode:h.vscode,extractFilePath:value=>value,getDefaultOpenMode:()=>mode,isDeletedReview:()=>false,
+    h.vscode.Uri.file=value=>({fsPath:value,with:fields=>({fsPath:value,...fields})});
+    h.tracker.getIsRecording=()=>true;
+    const sandbox={vscode:h.vscode,displayFileName:path.basename,extractFilePath:value=>value,getDefaultOpenMode:()=>mode,isDeletedReview:()=>false,
         createInlineDiffUri:value=>value,decorationManager:{updateDecorations(){}},WebviewDiffPanel:{createOrShow(){shown++;}},
         context:{extensionUri:{}},diffTracker:h.tracker};
     vm.runInNewContext(ts.transpileModule(`globalThis.callbacks={${entries.join(',')}}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
-    h.vscode.commands.executeCommand=(name,...args)=>sandbox.callbacks[name](...args);
+    const adapter=Object.create(h.load('nativeReviewAdapter.ts').NativeReviewAdapter.prototype);
+    adapter.tracker=h.tracker;
+    h.vscode.commands.executeCommand=(name,...args)=>{
+        if(name==='vscode.diff'){shown++;return;}
+        if(name==='diffTracker.nativeReview.openFile')return adapter.openFile(...args);
+        return sandbox.callbacks[name](...args);
+    };
     const run=h.load('reviewNavigation.ts').withReviewNavigation;
     const operation=run(h.tracker,'/a',async()=>{changes=changes.filter(c=>c.filePath!=='/a');return{status:'success',filePath:'/a'};});
     await loading.promise;h.vscode.window.activeTextEditor={};editorListener();release.resolve();
     assert.equal((await operation).status,'success');assert.equal(shown,0,'delayed navigation must never show after user focus changes');
+});
+
+
+await test('auto-next cancels after opening and closing an active webview tab',async()=>{
+    const h=harness(null);h.state.configuration.autoOpenNextPendingFile=true;
+    h.vscode.window.activeTextEditor=undefined;
+    h.vscode.window.onDidChangeActiveTextEditor=()=>({dispose(){}});
+    let tabListener;const original={isActive:true};const other={isActive:true};
+    const group={activeTab:original};
+    h.vscode.window.tabGroups={activeTabGroup:group,
+        onDidChangeTabs:fn=>{tabListener=fn;return{dispose(){}};},onDidChangeTabGroups:()=>({dispose(){}})};
+    let changes=[{filePath:'/a'},{filePath:'/b'}];
+    Object.assign(h.tracker,{getTrackedChanges:()=>changes,getTrackedChange:p=>changes.find(c=>c.filePath===p),getPausedGitRepositories:()=>[]});
+    const run=h.load('reviewNavigation.ts').withReviewNavigation;
+    await run(h.tracker,'/a',async()=>{
+        group.activeTab=other;original.isActive=false;
+        tabListener({opened:[other],changed:[original],closed:[]});
+        group.activeTab=original;original.isActive=true;
+        tabListener({opened:[],changed:[original],closed:[other]});
+        changes=changes.slice(1);return{status:'success',filePath:'/a'};
+    });
+    assert.equal(h.commands.length,0,'an intervening active webview must permanently cancel navigation');
 });
 
 console.log(`${count} production review UI cases passed (VS Code, DOM and renderer boundaries mocked).`);

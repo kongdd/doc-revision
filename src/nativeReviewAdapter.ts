@@ -117,8 +117,14 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
             void vscode.window.showInformationMessage('No safely reviewable text change is available here. Use the Changes view for read-only or unknown resources.');
             return { mode: 'unavailable', count: 0 };
         }
+        const originalUri = this.snapshotUri(token, BASE_SCHEME);
+        const currentUri = this.snapshotUri(token, CURRENT_SCHEME);
+        if (canOpen) {
+            await Promise.all([vscode.workspace.openTextDocument(originalUri), vscode.workspace.openTextDocument(currentUri)]);
+            if (!canOpen()) { return { mode: 'cancelled', count: 0 }; }
+        }
         await vscode.commands.executeCommand('vscode.diff',
-            this.snapshotUri(token, BASE_SCHEME), this.snapshotUri(token, CURRENT_SCHEME),
+            originalUri, currentUri,
             `Review Snapshot: ${displayFileName(token.filePath)}`,
             { preview: false, selection: new vscode.Range(0, 0, 0, 0) });
         return { mode: 'single-diff', count: 1 };
