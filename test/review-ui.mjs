@@ -2037,11 +2037,25 @@ await test('ordinary file and folder quick exclusions use exact rooted rules wit
     assert.ok(match.ignores('plain'));assert.equal(match.ignores('nested/plain'),false);
     assert.equal(match.ignores('plain-extra'),false);assert.ok(match.ignores('folder/child'));
     assert.equal(match.ignores('folder-extra/child'),false);
-    for(const name of ['a*','a?','a[1]','a\\b','space ','#comment','!negation']) {
+    for(const name of ['a*','a?','a[1]','space ','#comment','!negation']) {
         assert.equal((await h.controller.requestExcludeResource(path.join(root,name),false)).status,'blocked');
     }
     assert.equal((await h.controller.requestExcludeResource(root,true)).status,'blocked');
     assert.equal(h.state.updates.length,2,'refused paths must never alter settings');
+    const backslashResult=await h.controller.requestExcludeResource(path.join(root,'a\\b'),false);
+    if(path.sep==='\\') {
+        assert.equal(backslashResult.status,'saved','Windows backslashes identify path components');
+        const exact=h.state.workspaceConfiguration.watchExclude.find(rule=>rule.pattern==='/a/b');
+        assert.ok(exact,'Windows separators must canonicalize to the exact nested path');
+        const windowsMatch=require('ignore')().add(exact.pattern);
+        assert.ok(windowsMatch.ignores('a/b'));
+        assert.equal(windowsMatch.ignores('aXb'),false);
+        assert.equal(windowsMatch.ignores('a/bc'),false);
+        assert.equal(h.state.updates.length,3);
+    } else {
+        assert.equal(backslashResult.status,'blocked','literal backslashes cannot become exclusion escapes');
+        assert.equal(h.state.updates.length,2);
+    }
 });
 
 
