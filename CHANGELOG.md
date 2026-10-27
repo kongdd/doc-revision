@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.9
+
+- Add `diffTracker.onlyRecordReviewableText`, disabled by default, to skip new binary, unsupported-encoding and oversized resources using safe content classification. Preserve existing baselines, pending reviews and Undo; previously skipped content requires an explicit trustworthy baseline before text review.
+- Add **Stop Recording This File or Folder** to Explorer and pending-review context menus. Stage exact exclusions through the existing scope manager and Apply confirmation without silently accepting pending changes.
+- Add `diffTracker.autoOpenNextPendingFile`, disabled by default, to advance after successful single-file review with no pending content remaining. Preserve stable ordering and cancel navigation after an intervening editor or tab switch; batch actions do not navigate.
+
 ## 0.8.8
 
 - Make automatic recording in new workspaces and Git branch archive/rebuild prompts opt-in through `diffTracker.autoStartRecording` and `diffTracker.promptOnGitBranchChange`, both disabled by default.
