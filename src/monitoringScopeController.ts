@@ -5,6 +5,7 @@ import { detectLocalPathCaseSensitivity } from './utils/pathIdentity';
 import {
     CanonicalMonitoringScope,
     configuredScopeExplicitlyExcludesSubtree,
+    evaluateConfiguredScope,
     createLegacySourceFingerprint,
     createScopeConsentRecord,
     createScopeMigrationRecord,
@@ -333,13 +334,17 @@ export class MonitoringScopeController implements vscode.Disposable {
         return this.enqueueScopeSettingsWrite(() => this.saveCoverageSubtreeExclusion(targetPath));
     }
 
-    private async saveCoverageSubtreeExclusion(targetPath: string): Promise<{ status: 'saved' | 'alreadyExcluded' | 'blocked'; reason?: string }> {
+    public requestExcludeResource(targetPath: string, directory: boolean): Promise<{ status: 'saved' | 'alreadyExcluded' | 'blocked'; reason?: string }> {
+        return this.enqueueScopeSettingsWrite(() => this.saveCoverageSubtreeExclusion(targetPath, false, directory));
+    }
+
+    private async saveCoverageSubtreeExclusion(targetPath: string, requireCoverage = true, directory = true): Promise<{ status: 'saved' | 'alreadyExcluded' | 'blocked'; reason?: string }> {
         const blocked = (reason: string) => ({ status: 'blocked' as const, reason });
         if (typeof targetPath !== 'string' || !path.isAbsolute(targetPath)) {
             return blocked('Choose a valid absolute monitored directory.');
         }
         const canonicalPath = path.resolve(targetPath);
-        if (!this.tracker.getSubtreeCoverageGaps().some(gap => path.resolve(gap.targetPath) === canonicalPath)) {
+        if (requireCoverage && !this.tracker.getSubtreeCoverageGaps().some(gap => path.resolve(gap.targetPath) === canonicalPath)) {
             return blocked('The coverage warning no longer exists. Refresh Change Recording.');
         }
         const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(canonicalPath));
@@ -352,7 +357,7 @@ export class MonitoringScopeController implements vscode.Disposable {
         }
         // A literal path must not be interpreted as a glob or ignore comment.
         if (relative.split('/').some(segment => !segment || segment === '.' || segment === '..' ||
-            /^[#!]/.test(segment) || /[\\*?\[\]{}]/.test(segment))) {
+            /^[#!]/.test(segment) || segment.trim() !== segment || /[\\*?\[\]{}]/.test(segment))) {
             return blocked('This directory name cannot be expressed as an exact exclusion without glob expansion.');
         }
 
@@ -370,19 +375,22 @@ export class MonitoringScopeController implements vscode.Disposable {
         const identity = roots.find(root => root.uri === folder.uri.toString() && root.name === folder.name);
         if (!identity) { return blocked('The owning workspace folder changed. Refresh the scope manager.'); }
         const current = status.requested.scope;
-        if (configuredScopeExplicitlyExcludesSubtree(current, identity, relative)) {
+        const excludesTarget = (scope: CanonicalMonitoringScope): boolean => directory
+            ? configuredScopeExplicitlyExcludesSubtree(scope, identity, relative)
+            : evaluateConfiguredScope(scope, identity, relative, false, false).source === 'explicitExclude';
+        if (excludesTarget(current)) {
             return { status: 'alreadyExcluded' };
         }
         const rule = roots.length === 1
-            ? { scope: 'all' as const, pattern: `/${relative}/` }
-            : { scope: 'folder' as const, folder: folder.name, pattern: `/${relative}/` };
+            ? { scope: 'all' as const, pattern: `/${relative}${directory ? '/' : ''}` }
+            : { scope: 'folder' as const, folder: folder.name, pattern: `/${relative}${directory ? '/' : ''}` };
         const next: MonitoringScopeRequest = {
             mode: current.mode, includes: current.includes,
             excludes: [...current.excludes, rule]
         };
         const checked = validateAndCanonicalizeScope(next, roots);
         if (!checked.ok || !checked.scope ||
-            !configuredScopeExplicitlyExcludesSubtree(checked.scope, identity, relative)) {
+            !excludesTarget(checked.scope)) {
             return blocked('The exact directory exclusion cannot be validated for this workspace.');
         }
         try {
@@ -399,7 +407,7 @@ export class MonitoringScopeController implements vscode.Disposable {
                     !this.migrationRecordMatches(checked.scope.scopeRevision))) {
                 return blocked('Finish legacy watch-rule migration before adding a structured exclusion.');
             }
-            if (!this.tracker.getSubtreeCoverageGaps().some(gap => path.resolve(gap.targetPath) === canonicalPath)) {
+            if (requireCoverage && !this.tracker.getSubtreeCoverageGaps().some(gap => path.resolve(gap.targetPath) === canonicalPath)) {
                 return blocked('The coverage warning no longer exists. Refresh Change Recording.');
             }
             const owningFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(canonicalPath));

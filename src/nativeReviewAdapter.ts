@@ -1,3 +1,4 @@
+import { withReviewNavigation } from './reviewNavigation';
 import * as vscode from 'vscode';
 import { ActionResult, DiffTracker, FileDiff, ReviewToken } from './diffTracker';
 import { displayFileName } from './utils/displayPath';
@@ -18,7 +19,7 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
         this.disposables.push(
             vscode.workspace.registerTextDocumentContentProvider(BASE_SCHEME, this),
             vscode.workspace.registerTextDocumentContentProvider(CURRENT_SCHEME, this),
-            vscode.commands.registerCommand('diffTracker.nativeReview.openFile', (target: unknown) => this.openFile(target)),
+            vscode.commands.registerCommand('diffTracker.nativeReview.openFile', (target: unknown, canOpen?: () => boolean) => this.openFile(target, canOpen)),
             // Stable Quick Diff menus have no review-version provenance. This is
             // navigation only: deliberately ignore all supplied hunk coordinates.
             vscode.commands.registerCommand('diffTracker.nativeReview.openFromQuickDiff', (uri: vscode.Uri) =>
@@ -99,7 +100,8 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
         return uri.scheme === BASE_SCHEME ? change.originalContent : change.currentContent;
     }
 
-    private async openFile(target: unknown): Promise<{ mode: string; count: number }> {
+    private async openFile(target: unknown, canOpen?: () => boolean): Promise<{ mode: string; count: number }> {
+        if (canOpen && !canOpen()) { return { mode: 'cancelled', count: 0 }; }
         target ??= vscode.window.activeTextEditor?.document.uri;
         const filePath = typeof target === 'string' ? target
             : target instanceof vscode.Uri ? (target.scheme === 'file' ? target.fsPath : this.readToken(target)?.filePath)
@@ -109,7 +111,7 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
         if (!token) {
             const pending = filePath ? this.tracker.getTrackedChange(filePath) : undefined;
             if (pending) {
-                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', pending.filePath);
+                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', pending.filePath, ...(canOpen ? [canOpen] : []));
                 return { mode: 'existing-review', count: 1 };
             }
             void vscode.window.showInformationMessage('No safely reviewable text change is available here. Use the Changes view for read-only or unknown resources.');
@@ -169,9 +171,9 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
     private async applyFile(action: 'keep' | 'revert', context?: unknown): Promise<ActionResult> {
         const review = this.activeReview(context);
         if (!review) { return this.refuse('Focus a current Native Review snapshot; stale or unproven views cannot be changed. Open a new review.'); }
-        return this.reportAction(await (action === 'keep'
+        return this.reportAction(await withReviewNavigation(this.tracker, review.token.filePath, () => (action === 'keep'
             ? this.tracker.keepAllChangesInFile(review.token.filePath, review.token)
-            : this.tracker.revertFile(review.token.filePath, review.token)));
+            : this.tracker.revertFile(review.token.filePath, review.token))));
     }
 
     private async applyBlock(action: 'keep' | 'revert', context?: unknown): Promise<ActionResult> {
@@ -198,9 +200,9 @@ export class NativeReviewAdapter implements vscode.Disposable, vscode.TextDocume
         if (blocks.length !== 1) {
             return this.refuse('Select exactly one complete changed block, including whole lines. Partial, multiple, or deleted-line selections are unsupported; use reviewed-file actions instead.');
         }
-        return this.reportAction(await (action === 'keep'
+        return this.reportAction(await withReviewNavigation(this.tracker, review.token.filePath, () => (action === 'keep'
             ? this.tracker.keepBlock(token.filePath, blocks[0].blockId, token)
-            : this.tracker.revertBlock(token.filePath, blocks[0].blockId, token)));
+            : this.tracker.revertBlock(token.filePath, blocks[0].blockId, token))));
     }
 
     public dispose(): void {

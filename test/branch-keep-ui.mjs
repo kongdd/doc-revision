@@ -57,7 +57,7 @@ function harness({ cross = 1, mixed = false, cancel = false, onConfirm, result, 
     const sandbox = {
         diffTracker, displayFileName: value => value, refreshReview: () => { state.refreshes++; },
         reportBatch: (_label, value) => value, reportMixedBatch: (_label, value) => value,
-        vscode: { Uri: class {}, window: {
+        vscode: { workspace: { getConfiguration: () => ({ get: (_key, fallback) => fallback }) }, Uri: class {}, window: {
             showInformationMessage: message => { state.info.push(message); },
             showWarningMessage: async (message, options, ...buttons) => {
                 if (!options?.modal) { state.warnings.push(message); return; }
@@ -67,6 +67,11 @@ function harness({ cross = 1, mixed = false, cancel = false, onConfirm, result, 
             }
         } }
     };
+    const navigationSource = ts.createSourceFile('reviewNavigation.ts', fs.readFileSync('src/reviewNavigation.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+    const navigationFunction = navigationSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'withReviewNavigation');
+    vm.runInNewContext(ts.transpileModule(navigationFunction.getText(navigationSource).replace(/^export /, ''), {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 }
+    }).outputText, sandbox);
     vm.runInNewContext(ts.transpileModule(`${helpers.join('\n')}globalThis.callbacks = {${callbacks.join(',')}};`, {
         compilerOptions: { target: ts.ScriptTarget.ES2022 }
     }).outputText, sandbox);

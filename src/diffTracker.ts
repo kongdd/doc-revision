@@ -314,6 +314,7 @@ type StoppedReviewSnapshot = Omit<FileDiff, 'fileName' | 'originalContent' | 'ch
 interface PersistedTrackerState {
     version: 4 | 5;
     stoppedReviews?: StoppedReviewSnapshot[];
+    suppressedResourceBloom?: string;
     /** Parser-only provenance; never copied from JSON or emitted by buildPersistedState. */
     migratedFromV1?: boolean;
     isRecording: boolean;
@@ -796,6 +797,10 @@ export class DiffTracker {
     private fileSnapshots = new Map<string, string>();
     private baselineExistingFiles = new Set<string>();
     private unresolvedBaselineFiles: Map<string, string> = new UnresolvedBaselineMap();
+    // Fixed-size conservative membership: no content or per-file persistent records.
+    // False positives require explicit baseline reset; false absence is never inferred.
+    private suppressedResourceBloom = Buffer.alloc(2048);
+
     private opaqueBaselineFiles = new Map<string, OpaqueBaselineState>();
     private largeFileReminders = new Map<string, LargeFileReminderState>();
     private readonly maxFullContentBytes = 64 * 1024 * 1024;
@@ -1144,6 +1149,10 @@ export class DiffTracker {
         this.committedLegacyWatchExcludeByRoot = new Map(
             state.legacyWatchExcludeByRoot.map(([rootUri, patterns]) => [rootUri, [...patterns]])
         );
+        if (state.suppressedResourceBloom) {
+            const saved = Buffer.from(state.suppressedResourceBloom, 'hex');
+            for (let i = 0; i < saved.length; i++) { this.suppressedResourceBloom[i] |= saved[i]; }
+        }
         this.fileSnapshots = new Map(state.fileSnapshots);
         this.fileModes = new Map(state.fileModes);
         this.baselineExistingFiles = new Set(state.baselineExistingFiles);
@@ -3299,6 +3308,8 @@ export class DiffTracker {
 
         return {
             version: 5,
+            suppressedResourceBloom: this.suppressedResourceBloom.some(byte => byte !== 0)
+                ? this.suppressedResourceBloom.toString('hex') : undefined,
             stoppedReviews: this.isRecording ? undefined : this.captureStoppedReviews(),
             isRecording: this.isRecording,
             baselineState: this.baselineBuilding || !this.snapshotInitialized ? 'building' : 'ready',
@@ -3624,6 +3635,7 @@ export class DiffTracker {
         }
 
         const candidate = raw as {
+            suppressedResourceBloom?: unknown;
             version?: unknown;
             isRecording?: unknown;
             baselineState?: unknown;
@@ -3943,7 +3955,10 @@ export class DiffTracker {
             }
         } else if (candidate.version === 5 && !candidate.isRecording) { return undefined; }
 
+        if (candidate.suppressedResourceBloom !== undefined &&
+            (typeof candidate.suppressedResourceBloom !== 'string' || !/^[0-9a-f]{4096}$/.test(candidate.suppressedResourceBloom))) { return undefined; }
         return {
+            suppressedResourceBloom: candidate.suppressedResourceBloom as string | undefined,
             version: candidate.version === 5 ? 5 : 4,
             stoppedReviews,
             isRecording: candidate.isRecording,
@@ -8177,6 +8192,7 @@ export class DiffTracker {
     }
 
     private reconcileLargeFileReminder(filePath: string, state: CurrentFileState): boolean {
+        if (this.suppressUnsupportedResource(filePath, state)) { return true; }
         const previous = this.largeFileReminders.get(filePath);
         if (this.isLargeFileState(state) || (previous && state.kind === 'missing')) {
             const observed = state.kind === 'missing' ? { exists: false } : { exists: true, size: state.size };
@@ -8459,6 +8475,31 @@ export class DiffTracker {
         this.emitTrackChangesEvent({ changedFiles: [filePath] });
     }
 
+    private suppressedResourcePositions(filePath: string): number[] {
+        const hash = createHash('sha256').update(this.canonicalTrackingPath(filePath)).digest();
+        return [0, 4, 8].map(offset => hash.readUInt32BE(offset) % (this.suppressedResourceBloom.length * 8));
+    }
+
+    private mayHaveSuppressedResource(filePath: string): boolean {
+        return this.suppressedResourcePositions(filePath).every(bit =>
+            (this.suppressedResourceBloom[bit >>> 3] & (1 << (bit & 7))) !== 0);
+    }
+
+    private suppressUnsupportedResource(filePath: string, state: CurrentFileState): boolean {
+        if (!vscode.workspace.getConfiguration('diffTracker').get<boolean>('onlyRecordReviewableText', false) ||
+            (!this.isLargeFileState(state) && !this.isStableUnsupportedState(state)) ||
+            this.hasCapturedBaseline(filePath) || this.unresolvedBaselineFiles.has(filePath) ||
+            this.largeFileReminders.has(filePath) || this.trackedChanges.has(filePath) ||
+            this.hasDirtyDocument(filePath) || this.hasScanUncertainty(filePath)) { return false; }
+        if (!this.mayHaveSuppressedResource(filePath)) {
+            for (const bit of this.suppressedResourcePositions(filePath)) {
+                this.suppressedResourceBloom[bit >>> 3] |= 1 << (bit & 7);
+            }
+            this.schedulePersistState();
+        }
+        return true;
+    }
+
     private isStableUnsupportedBaselineReason(reason: string): boolean {
         return reason === 'File exceeds the 5 MiB limit' ||
             reason === 'UTF-8 BOM files require encoding preservation and are read-only in this version' ||
@@ -8541,6 +8582,7 @@ export class DiffTracker {
         const uri = vscode.Uri.file(filePath);
         if (this.pendingScopeExplicitlyExcludes(uri) || this.hasCapturedBaseline(filePath) ||
             this.largeFileReminders.has(filePath) || this.isPathIgnored(uri)) { return false; }
+        if (this.suppressUnsupportedResource(filePath, state)) { return false; }
         const plan = this.planScannedBaseline(filePath, state, scope);
         if (budget) { this.consumeCandidatePersistenceBudget(filePath, plan, budget); }
         const beforeReason = this.unresolvedBaselineFiles.get(filePath);
@@ -8720,9 +8762,15 @@ export class DiffTracker {
             if (await this.isUntrackedDirectory(uri)) { continue; }
             if (!this.isCurrentEpoch(epoch)) { return; }
             if (this.isPathIgnored(uri) || this.fileSnapshots.has(filePath) || this.unresolvedBaselineFiles.has(filePath) || this.opaqueBaselineFiles.has(filePath) || this.largeFileReminders.has(filePath)) { continue; }
+            if (vscode.workspace.getConfiguration('diffTracker').get<boolean>('onlyRecordReviewableText', false)) {
+                const state = await this.readFileSnapshot(uri);
+                if (!this.isCurrentEpoch(epoch) || (recheckCurrent && !recheckCurrent())) { return; }
+                if (this.suppressUnsupportedResource(filePath, state)) { continue; }
+            }
             const observedCreation = this.hasObservedCreation(filePath);
-            const plan: CandidateBaselinePlan =
-                observedCreation || (this.scanCoverage && this.scanCoverage === this.ignoreFingerprint)
+            const plan: CandidateBaselinePlan = this.mayHaveSuppressedResource(filePath)
+                ? { kind: 'unresolved', reason: 'Earlier content was not recorded; explicitly reset the baseline to current disk state before text review' }
+                : observedCreation || (this.scanCoverage && this.scanCoverage === this.ignoreFingerprint)
                     ? { kind: 'text', content: '', baselineExists: false }
                     : {
                         kind: 'unresolved',
@@ -9508,6 +9556,11 @@ export class DiffTracker {
             }
             const state = await this.readFileSnapshot(uri);
             if (!creationIsCurrent()) { return; }
+            if (this.suppressUnsupportedResource(filePath, state)) { return; }
+            if (!this.hasCapturedBaseline(filePath) && this.mayHaveSuppressedResource(filePath)) {
+                this.recordUnresolvedBaseline(filePath, 'Earlier content was not recorded; explicitly reset the baseline to current disk state before text review');
+                return;
+            }
             if (!this.largeFileReminders.has(filePath) && !this.fileSnapshots.has(filePath) && !this.opaqueBaselineFiles.has(filePath) &&
                 (!this.unresolvedBaselineFiles.has(filePath) || this.postBaselineUnknownFiles.has(filePath))) {
                 const beforeReason = this.unresolvedBaselineFiles.get(filePath);
@@ -9673,6 +9726,7 @@ export class DiffTracker {
             }
         }
         if (!latestRead || !this.isCurrentEpoch(epoch) || (operationCurrent && !operationCurrent()) || this.isPathIgnored(uri)) { return; }
+        if (this.suppressUnsupportedResource(filePath, state)) { return; }
         if (this.reconcileLargeFileReminder(filePath, state)) { return; }
         // A watcher read can finish after native Undo or another buffer edit.
         // Its disk snapshot must not erase the newer unsaved review.
@@ -12862,20 +12916,35 @@ export class DiffTracker {
 
         try {
             const stat = fs.statSync(filePath);
+            if (stat.isFile() && stat.size > 5 * 1024 * 1024 && this.suppressUnsupportedResource(filePath, {
+                kind: 'unavailable', reason: 'File exceeds the 5 MiB limit', size: stat.size, mtime: stat.mtimeMs
+            })) { return; }
             if (!stat.isFile() || stat.size > 5 * 1024 * 1024) {
                 this.markFileUnavailable(filePath, 'Baseline is unsupported or exceeds the 5 MiB limit');
                 return;
             }
             const bytes = fs.readFileSync(filePath);
             if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+                if (this.suppressUnsupportedResource(filePath, { kind: 'unavailable', reason: 'UTF-8 BOM files require encoding preservation and are read-only in this version', size: stat.size, mtime: stat.mtimeMs })) { return; }
                 this.markFileUnavailable(filePath, 'UTF-8 BOM baseline is unsupported in this version');
                 return;
             }
             if (this.isLikelyBinaryContent(bytes)) {
+                if (this.suppressUnsupportedResource(filePath, { kind: 'unavailable', reason: 'Binary content is unsupported', size: stat.size, mtime: stat.mtimeMs })) { return; }
                 this.markFileUnavailable(filePath, 'Binary baseline content is unsupported');
                 return;
             }
-            const diskContent = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            let diskContent: string;
+            try { diskContent = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+            catch {
+                if (this.suppressUnsupportedResource(filePath, { kind: 'unavailable', reason: 'Unsupported text encoding (expected UTF-8)', size: stat.size, mtime: stat.mtimeMs })) { return; }
+                this.markFileUnavailable(filePath, 'Baseline cannot be read or decoded');
+                return;
+            }
+            if (this.snapshotInitialized && this.mayHaveSuppressedResource(filePath)) {
+                this.recordUnresolvedBaseline(filePath, 'Earlier content was not recorded; explicitly reset the baseline to current disk state before text review');
+                return;
+            }
             const content = useDocumentContent ? doc.getText() : diskContent;
             const contentBytes = useDocumentContent ? new TextEncoder().encode(content) : bytes;
             if (contentBytes.length > 5 * 1024 * 1024 || this.isLikelyBinaryContent(contentBytes)) {
@@ -12901,6 +12970,10 @@ export class DiffTracker {
             if (persistenceBudget?.failedReason) { throw error; }
             if (!this.isFileNotFound(error)) {
                 this.markFileUnavailable(filePath, 'Baseline cannot be read or decoded');
+                return;
+            }
+            if (this.snapshotInitialized && this.mayHaveSuppressedResource(filePath)) {
+                this.recordUnresolvedBaseline(filePath, 'Earlier content was not recorded; explicitly reset the baseline to current disk state before text review');
                 return;
             }
             if (!this.snapshotInitialized && persistenceBudget) {

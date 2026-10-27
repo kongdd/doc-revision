@@ -257,6 +257,18 @@
           "default": false,
           "scope": "window",
           "description": "Start recording in a new workspace with no saved session. Saved stopped sessions remain stopped; active sessions resume normally."
+        },
+        "diffTracker.onlyRecordReviewableText": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Record only safely reviewable text for new resources. Existing reviews and Undo are preserved. Previously skipped content requires an explicit new baseline before text review."
+        },
+        "diffTracker.autoOpenNextPendingFile": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "After a successful single-file review resolves all pending changes in that file, open the next pending file unless you switched editors. Batch actions do not navigate."
         }
       }
     },
@@ -541,6 +553,11 @@
         "title": "Revert Selected Whole Block",
         "category": "Code Diff Tracker",
         "icon": "$(discard)"
+      },
+      {
+        "command": "diffTracker.excludeResource",
+        "title": "Stop Recording This File or Folder",
+        "category": "Code Diff Tracker"
       }
     ],
     "menus": {
@@ -654,6 +671,11 @@
           "command": "diffTracker.nativeReview.openFile",
           "when": "view == diffTracker.changesView && viewItem == changedFile",
           "group": "2_review@3"
+        },
+        {
+          "command": "diffTracker.excludeResource",
+          "when": "view == diffTracker.changesView && viewItem =~ /^(changedFile|opaqueFile|unknownFile|largeFileReminder|retainedLargeFileReview|reviewFolder)$/",
+          "group": "3_scope@1"
         }
       ],
       "explorer/context": [
@@ -661,6 +683,11 @@
           "command": "diffTracker.openDiffDefault",
           "when": "resourceScheme == file && diffTracker.isRecording",
           "group": "2_main@1"
+        },
+        {
+          "command": "diffTracker.excludeResource",
+          "when": "resourceScheme == file",
+          "group": "2_main@2"
         }
       ],
       "view/title": [

@@ -2025,6 +2025,86 @@ await test('Clear rejected for changed recording state does not cancel pending S
     git.resolve(true);assert.equal(await start,true);
 });
 
+
+await test('ordinary file and folder quick exclusions use exact rooted rules without coverage warnings',async()=>{
+    const h=coverageExclusionHarness();h.state.subtreeCoverageGaps=[];
+    const root=path.resolve('.');
+    assert.equal((await h.controller.requestExcludeResource(path.join(root,'plain'),false)).status,'saved');
+    assert.equal((await h.controller.requestExcludeResource(path.join(root,'folder'),true)).status,'saved');
+    const patterns=h.state.workspaceConfiguration.watchExclude.map(rule=>rule.pattern);
+    assert.ok(patterns.includes('/plain'));assert.ok(patterns.includes('/folder/'));
+    const match=require('ignore')().add(patterns);
+    assert.ok(match.ignores('plain'));assert.equal(match.ignores('nested/plain'),false);
+    assert.equal(match.ignores('plain-extra'),false);assert.ok(match.ignores('folder/child'));
+    assert.equal(match.ignores('folder-extra/child'),false);
+    for(const name of ['a*','a?','a[1]','a\\b','space ','#comment','!negation']) {
+        assert.equal((await h.controller.requestExcludeResource(path.join(root,name),false)).status,'blocked');
+    }
+    assert.equal((await h.controller.requestExcludeResource(root,true)).status,'blocked');
+    assert.equal(h.state.updates.length,2,'refused paths must never alter settings');
+});
+
+
+for(const pattern of ['/plain/','/plain/*'])await test(`file exclusion is not confused with directory rule ${pattern}`,async()=>{
+    const h=coverageExclusionHarness();h.state.subtreeCoverageGaps=[];
+    h.state.workspaceConfiguration.watchExclude=[{scope:'all',pattern}];
+    const outcome=await h.controller.requestExcludeResource(path.resolve('plain'),false);
+    assert.equal(outcome.status,'saved');assert.ok(h.state.workspaceConfiguration.watchExclude.some(rule=>rule.pattern==='/plain'));
+});
+
+for(const scenario of ['success','disabled','failed','conflict','cancelled','remaining','switch','switch-back','paused','last']) {
+    await test(`auto-next navigation ${scenario}`,async()=>{
+        const h=harness(null);h.state.configuration.autoOpenNextPendingFile=scenario!=='disabled';
+        let listener;const originalEditor={};h.vscode.window.activeTextEditor=originalEditor;
+        h.vscode.window.onDidChangeActiveTextEditor=fn=>{listener=fn;return{dispose(){listener=undefined;}};};
+        let changes=['/b','/c','/a'].map(filePath=>({filePath}));
+        if(scenario==='last')changes=[{filePath:'/b'}];
+        Object.assign(h.tracker,{getTrackedChanges:()=>changes,getTrackedChange:p=>changes.find(c=>c.filePath===p),
+            getPausedGitRepositories:()=>scenario==='paused'?[{}]:[]});
+        const run=h.load('reviewNavigation.ts').withReviewNavigation;
+        const status=['failed','conflict','cancelled'].includes(scenario)?scenario:'success';
+        const result=await run(h.tracker,'/b',async()=>{
+            if(scenario!=='remaining')changes=changes.filter(c=>c.filePath!=='/b');
+            if(scenario.startsWith('switch')){h.vscode.window.activeTextEditor={};listener();}
+            if(scenario==='switch-back'){h.vscode.window.activeTextEditor=originalEditor;listener();}
+            return{status,filePath:'/b'};
+        });
+        assert.equal(result.status,status);
+        const navigations=h.commands.filter(command=>command[0]==='diffTracker.openDiffDefault');
+        assert.equal(navigations.length,scenario==='success'?1:0);
+        if(navigations.length)assert.equal(navigations[0][1],'/c','stable path order independent of timestamps');
+        assert.equal(listener,undefined,'temporary listener must be disposed');
+    });
+}
+
+
+for(const mode of ['original','inline','splitOriginalWebview'])await test(`auto-next rechecks focus after ${mode} document loading`,async()=>{
+    const h=harness(null);h.state.configuration.autoOpenNextPendingFile=true;
+    let editorListener;h.vscode.window.activeTextEditor={};
+    h.vscode.window.onDidChangeActiveTextEditor=fn=>{editorListener=fn;return{dispose(){}};};
+    let changes=[{filePath:'/a'},{filePath:'/b'}],shown=0;
+    Object.assign(h.tracker,{getTrackedChanges:()=>changes,getTrackedChange:p=>changes.find(c=>c.filePath===p),getPausedGitRepositories:()=>[]});
+    const loading=deferred(),release=deferred();
+    h.vscode.workspace.openTextDocument=async()=>{loading.resolve();await release.promise;return{};};
+    h.vscode.window.showTextDocument=async()=>{shown++;return{};};
+    const source=ts.createSourceFile('extension.ts',fs.readFileSync('src/extension.ts','utf8'),ts.ScriptTarget.Latest,true);
+    const names=new Set(['openDiffDefault','openOriginalFile','showInlineDiff','showOriginalAndWebviewSplit'].map(name=>'diffTracker.'+name));
+    const entries=[];function visit(node){
+        if(ts.isCallExpression(node)&&node.expression.getText(source)==='vscode.commands.registerCommand'&&names.has(node.arguments[0]?.text))
+            entries.push(`${JSON.stringify(node.arguments[0].text)}:${node.arguments[1].getText(source)}`);
+        ts.forEachChild(node,visit);
+    }visit(source);
+    const sandbox={vscode:h.vscode,extractFilePath:value=>value,getDefaultOpenMode:()=>mode,isDeletedReview:()=>false,
+        createInlineDiffUri:value=>value,decorationManager:{updateDecorations(){}},WebviewDiffPanel:{createOrShow(){shown++;}},
+        context:{extensionUri:{}},diffTracker:h.tracker};
+    vm.runInNewContext(ts.transpileModule(`globalThis.callbacks={${entries.join(',')}}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
+    h.vscode.commands.executeCommand=(name,...args)=>sandbox.callbacks[name](...args);
+    const run=h.load('reviewNavigation.ts').withReviewNavigation;
+    const operation=run(h.tracker,'/a',async()=>{changes=changes.filter(c=>c.filePath!=='/a');return{status:'success',filePath:'/a'};});
+    await loading.promise;h.vscode.window.activeTextEditor={};editorListener();release.resolve();
+    assert.equal((await operation).status,'success');assert.equal(shown,0,'delayed navigation must never show after user focus changes');
+});
+
 console.log(`${count} production review UI cases passed (VS Code, DOM and renderer boundaries mocked).`);
 
 await test('Start while recording preserves the current baseline without confirmation', async () => {

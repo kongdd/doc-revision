@@ -258,6 +258,8 @@ code --install-extension lengmh.code-diff-tracker
 | `diffTracker.webviewExpandUnchanged` | `false` | Expand all unchanged context lines in a new WebView panel |
 | `diffTracker.openWebviewBeside` | `false` | Open WebView diff in a side editor group instead of the current editor group |
 | `diffTracker.watchExclude` | `[]` | Structured explicit exclusions without `!` negation; legacy string entries retain compatibility until migration |
+| `diffTracker.onlyRecordReviewableText` | `false` | Skip new unsupported resources using safe content classification; preserve existing review and Undo |
+| `diffTracker.autoOpenNextPendingFile` | `false` | Open the next pending file after successful single-file review, only when the current file has no remaining review |
 | `diffTracker.onlyTrackAutomatedChanges` | `false` | Track external/tagged automation edits while retaining uncertain editor edits for explicit review |
 
 Choose the opening mode in **Settings → Display → Default open mode**, through **Select Default Open Mode**, or in VS Code settings. The values are `webview`, `inline`, `sideBySide`, `original`, `splitOriginalWebview` and `nativeReview`. Display/highlight settings remain in the sidebar Settings panel; monitoring rules are in **Manage Monitoring Scope**.
@@ -265,6 +267,12 @@ Choose the opening mode in **Settings → Display → Default open mode**, throu
 WebView display defaults are also available under **Settings → Display**: **WebView default layout**, **WebView default: Wrap**, and **WebView default: Expand**. Expand shows unchanged context, including lines outside the changed hunks. These settings initialize a new panel; an existing panel keeps its toolbar choices during updates, hiding/revealing, and file switches. Close the WebView tab and open it again to apply changed defaults. Toolbar clicks do not rewrite your settings. These defaults do not change the native VS Code diff editor.
 
 When `diffTracker.openWebviewBeside` is enabled, WebView diff opens in a side editor group. By default it opens in the current editor group.
+
+The Recording settings group also exposes **Only record reviewable text** and **Auto-open next pending file**. Text eligibility uses the existing UTF-8, binary-content and size checks, including extensionless files. Enabling the text filter does not clear existing reviews or Undo. Dirty editors, read failures and coverage gaps remain unresolved. A previously skipped resource that becomes text requires **Reset Unknown Baseline (Current Disk State)**; disabling the filter does not recreate missed history. A bounded, conservative membership record protects this rule across restart; it may also require a baseline reset for another untracked path. Stop continues to freeze the saved review.
+
+Use **Stop Recording This File or Folder** from Explorer or a pending file/folder context menu to stage an exact exclusion and open the existing scope Apply flow. Pending reviews are discarded only after its explicit confirmation; cancelling preserves them. Existing unsaved scope drafts must be closed first. Workspace roots, ambiguous folder names and paths that cannot be represented exactly by the restricted exclusion grammar are refused without changing settings.
+
+Automatic navigation uses a stable path order and the configured default open mode. It wraps to remaining earlier files; when none remain, it leaves the current editor open. Failed, stale, cancelled or paused actions, remaining blocks, batch actions, and user focus changes do not navigate.
 
 When `diffTracker.onlyTrackAutomatedChanges` is enabled:
 

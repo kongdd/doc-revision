@@ -1,8 +1,10 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { displayFileName, workspaceDisplayParts } from './utils/displayPath';
 import { DiffTracker, FileDiff, LargeFileReminderToken, OpaqueReviewToken, ReviewKind, ReviewToken, UnknownReviewToken, SubtreeCoverageDiagnostic } from './diffTracker';
 
 interface DirNode {
+    exclusionPath?: string;
     name: string;
     childrenDirs: Map<string, DirNode>;
     files: FileDiff[];
@@ -285,11 +287,14 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<TreeItem>, 
             if (!next) {
                 next = {
                     name: dirName,
+                    exclusionPath: path.resolve(fileDiff.filePath, ...Array(parts.length - 1 - i).fill('..')),
                     childrenDirs: new Map<string, DirNode>(),
                     files: []
                 };
                 current.childrenDirs.set(dirName, next);
             }
+            const physicalPath = path.resolve(fileDiff.filePath, ...Array(parts.length - 1 - i).fill('..'));
+            if (next.exclusionPath !== physicalPath) { next.exclusionPath = undefined; }
             current = next;
         }
 
@@ -308,6 +313,7 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<TreeItem>, 
 
             const dirItem = new TreeItem(childNode.name, vscode.TreeItemCollapsibleState.Expanded);
             dirItem.iconPath = new vscode.ThemeIcon('folder');
+            dirItem.exclusionPath = childNode.exclusionPath;
             dirItem.children = this.buildTreeItemsFromNode(childNode);
             // Snapshot actual descendant review tokens, not a recursive path
             // prefix that might escape a multi-root workspace.
@@ -360,6 +366,7 @@ class TreeItem extends vscode.TreeItem {
     public children?: TreeItem[];
     public filePath?: string;
     public coveragePath?: string;
+    public exclusionPath?: string;
     public isDeleted?: boolean;
     public reviewToken?: ReviewToken;
     public opaqueReviewToken?: OpaqueReviewToken;

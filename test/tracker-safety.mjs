@@ -5806,6 +5806,91 @@ registerNativeReviewInvariants({
     }
 });
 
+
+test('CONVENIENCE text filter suppresses new unsupported resources without per-file baselines', async()=>{
+    vscodeExcludes={onlyRecordReviewableText:true};
+    for (const bytes of [Buffer.from([0,1,2]),Buffer.from([0xff,0xfe,0x61]),Buffer.from([0xef,0xbb,0xbf,0x61]),Buffer.alloc(5*1024*1024+1,65)]) {
+        const p=file('unsupported');fs.writeFileSync(p,bytes);
+        await tracker.onExternalFileCreated(Uri.file(p));await scan(p);
+        assert.equal(pending(p),undefined);assert.equal(tracker.fileSnapshots.has(p),false);
+        assert.equal(tracker.opaqueBaselineFiles.has(p),false);assert.equal(tracker.unresolvedBaselineFiles.has(p),false);
+        assert.ok(tracker.mayHaveSuppressedResource(p));
+    }
+    const large=file('large');fs.writeFileSync(large,'');fs.truncateSync(large,64*1024*1024+1);
+    await tracker.onExternalFileCreated(Uri.file(large));assert.equal(pending(large),undefined);
+    assert.equal(tracker.largeFileReminders.size,0);assert.equal(tracker.suppressedResourceBloom.length,2048);
+    const text=file('extensionless');fs.writeFileSync(text,'#!/bin/sh\necho yes\n');
+    await tracker.onExternalFileCreated(Uri.file(text));assert.equal(pending(text)?.reviewKind,'text');
+    assert.equal(tracker.getOriginalContent(text),'');
+});
+test('CONVENIENCE filter preserves text transitions, deletions, dirty and unreadable evidence',async()=>{
+    vscodeExcludes={onlyRecordReviewableText:true};
+    const p=file();seed(p,'old text','pending text');await scan(p);
+    fs.writeFileSync(p,Buffer.from([0,1,2]));await scan(p);
+    assert.equal(tracker.getOriginalContent(p),'old text');assert.ok(pending(p));
+    fs.truncateSync(p,64*1024*1024+1);await scan(p);
+    assert.equal(tracker.getOriginalContent(p),'old text');assert.equal(pending(p)?.largeFileReminder?.retainedReview,true);
+    fs.unlinkSync(p);await scan(p);assert.ok(pending(p));
+    const deleted=file();seed(deleted,'delete me');fs.unlinkSync(deleted);await tracker.onExternalFileDeleted(Uri.file(deleted));
+    assert.equal(pending(deleted)?.reviewKind,'text');assert.equal(pending(deleted)?.isDeleted,true);
+    const dirty=file();fs.writeFileSync(dirty,Buffer.from([0,1,2]));const doc=document(dirty);doc.isDirty=true;
+    await scan(dirty);assert.equal(pending(dirty)?.reviewKind,'unknown');
+    const unreadable=file();fs.writeFileSync(unreadable,'text');faults.set(`${unreadable}:read`,error('NoPermissions'));
+    await scan(unreadable);assert.equal(pending(unreadable)?.reviewKind,'unknown');
+});
+test('CONVENIENCE skipped content cannot become an invented empty baseline after disabling or restart',async()=>{
+    await tracker.dispose();const storage=Uri.file(file('filter-storage'));
+    tracker=new DiffTracker(storage);tracker.isRecording=true;tracker.externalWatcherEnabled=true;tracker.snapshotInitialized=true;
+    vscodeExcludes={onlyRecordReviewableText:true};const p=file('skipped');fs.writeFileSync(p,Buffer.from([0,1]));
+    await tracker.onExternalFileCreated(Uri.file(p));assert.equal(pending(p),undefined);
+    assert.equal(await tracker.flushPendingPersistence(),true);
+    const raw=JSON.parse(fs.readFileSync(path.join(storage.fsPath,'session-state.json'),'utf8'));
+    assert.equal(raw.suppressedResourceBloom.length,4096);
+    assert.equal(tracker.parsePersistedState({...raw,suppressedResourceBloom:'bad'}),undefined);
+    await tracker.dispose();tracker=new DiffTracker(storage);
+    vscodeExcludes={};assert.equal(await tracker.restorePersistedState(),'restored');
+    fs.writeFileSync(p,'now text');await tracker.onExternalFileCreated(Uri.file(p));
+    assert.equal(tracker.getOriginalContent(p),undefined);assert.equal(pending(p)?.reviewKind,'unknown');
+    const token=tracker.getUnknownReviewToken(p);assert.ok(token);
+    assert.equal((await tracker.resetUnknownBaseline(p,token)).status,'success');
+    assert.equal(tracker.getOriginalContent(p),'now text');
+});
+
+for(const current of ['binary','text'])test(`CONVENIENCE real restore enumeration preserves skipped ${current} provenance`,async()=>{
+    await tracker.dispose();const storage=Uri.file(file('filter-real-restore'));
+    const p=file('skip-restore');fs.writeFileSync(p,Buffer.from([0,1,2]));listedFiles=[Uri.file(p)];
+    vscodeExcludes={onlyRecordReviewableText:true};tracker=new DiffTracker(storage);
+    tracker.startRecording();await waitUntil(()=>tracker.getBaselineState()==='ready');
+    assert.equal(tracker.getOriginalContent(p),undefined);assert.equal(pending(p),undefined);
+    assert.equal(await tracker.flushPendingPersistence(),true);await tracker.dispose();
+    if(current==='text')fs.writeFileSync(p,'offline text');
+    tracker=new DiffTracker(storage);assert.equal(await tracker.restorePersistedState(),'restored');
+    assert.equal(tracker.getOriginalContent(p),undefined);
+    assert.equal(pending(p)?.reviewKind,current==='text'?'unknown':undefined);
+    assert.equal(tracker.opaqueBaselineFiles.has(p),false);
+});
+
+
+test('CONVENIENCE missing skipped file with dirty editor never gains an empty baseline',async()=>{
+    vscodeExcludes={onlyRecordReviewableText:true};const p=file('dirty-missing-skipped');
+    fs.writeFileSync(p,Buffer.from([0,1,2]));await tracker.onExternalFileCreated(Uri.file(p));
+    const doc=document(p);fs.unlinkSync(p);doc.isDirty=true;doc.getText=()=> 'unsaved replacement';
+    tracker.ensureSnapshotForDocument(doc);
+    assert.equal(tracker.getOriginalContent(p),undefined);assert.equal(pending(p)?.reviewKind,'unknown');
+    assert.ok(tracker.unresolvedBaselineFiles.has(p));
+});
+
+test('CONVENIENCE initial scan and open binary document stay unrecorded while baseline text remains tracked',async()=>{
+    vscodeExcludes={onlyRecordReviewableText:true};tracker.snapshotInitialized=false;
+    const p=file('binary');fs.writeFileSync(p,Buffer.from([0,1,2]));
+    assert.equal(tracker.recordScannedBaseline(p,await tracker.readFileSnapshot(Uri.file(p)),'workspace'),false);
+    tracker.ensureSnapshotForDocument(document(p),true);
+    assert.equal(pending(p),undefined);assert.equal(tracker.unresolvedBaselineFiles.has(p),false);
+    const text=file('plain');fs.writeFileSync(text,'baseline');
+    assert.equal(tracker.recordScannedBaseline(text,await tracker.readFileSnapshot(Uri.file(text)),'workspace'),true);
+    assert.equal(tracker.getOriginalContent(text),'baseline');
+});
+
 if(process.env.DT_TEST_FILTER) {const selected=tests.filter(t=>t.name.includes(process.env.DT_TEST_FILTER));tests.splice(0,tests.length,...selected);}
 if(process.env.DT_EXPECT_LEGACY_REJECTION==='1') { const selected=tests.filter(t=>t.name.startsWith('SCHEMA-DOWNGRADE '));tests.splice(0,tests.length,...selected); }
 if(process.env.DT_PARENT_ONLY==='1') { const selected=tests.filter(t=>t.name.startsWith('PARENT '));tests.splice(0,tests.length,...selected); }
