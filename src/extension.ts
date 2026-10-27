@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import { withReviewNavigation } from './reviewNavigation';
 import { displayFileName } from './utils/displayPath';
 import * as vscode from 'vscode';
 import { ActionResult, BatchActionResult, DiffTracker, LargeFileReminderToken, MixedBatchActionResult, OpaqueReviewToken, ReviewToken, UnknownReviewToken, TrackChangesEvent } from './diffTracker';
@@ -551,7 +553,8 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.showInlineDiff', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.showInlineDiff', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
 
             if (!filePath) {
@@ -560,13 +563,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const inlineUri = createInlineDiffUri(filePath);
             const doc = await vscode.workspace.openTextDocument(inlineUri);
+            if (canOpen && !canOpen()) { return; }
             const editor = await vscode.window.showTextDocument(doc);
             decorationManager.updateDecorations(editor);
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.showSideBySideDiff', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.showSideBySideDiff', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
 
             if (!filePath) {
@@ -577,7 +582,7 @@ export async function activate(context: vscode.ExtensionContext) {
             // Native Review already owns token-bound, read-only snapshots and
             // the safe Webview fallback for opaque or unknown pending changes.
             if (!diffTracker.getIsRecording()) {
-                return vscode.commands.executeCommand('diffTracker.nativeReview.openFile', filePath);
+                return vscode.commands.executeCommand('diffTracker.nativeReview.openFile', filePath, ...(canOpen ? [canOpen] : []));
             }
 
             // Show side-by-side diff using VS Code's built-in diff editor
@@ -585,6 +590,10 @@ export async function activate(context: vscode.ExtensionContext) {
             const originalUri = currentUri.with({ scheme: 'diff-tracker-original' });
 
             const fileName = displayFileName(filePath);
+            if (canOpen) {
+                await Promise.all([vscode.workspace.openTextDocument(originalUri), vscode.workspace.openTextDocument(currentUri)]);
+                if (!canOpen()) { return; }
+            }
 
             await vscode.commands.executeCommand('vscode.diff',
                 originalUri,
@@ -737,7 +746,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const captured = token ?? (typeof filePathOrItem === 'string'
                 ? diffTracker.getReviewToken(filePath) : filePathOrItem.reviewToken);
             if (!captured) { return missingReview(filePath); }
-            return reportAction(await diffTracker.keepAllChangesInFile(filePath, captured));
+            return reportAction(await withReviewNavigation(diffTracker, filePath, () => diffTracker.keepAllChangesInFile(filePath, captured)));
         })
     );
 
@@ -950,28 +959,31 @@ export async function activate(context: vscode.ExtensionContext) {
                 ? diffTracker.getReviewToken(filePath) : filePathOrItem.reviewToken);
             if (!token) { return missingReview(filePath); }
 
-            const answer = await vscode.window.showWarningMessage(
-                `Revert changes for ${displayFileName(filePath)}? Review pending changes and save any dirty editors first.`,
-                { modal: true },
-                'Revert',
-                'Cancel'
-            );
+            return withReviewNavigation(diffTracker, filePath, async () => {
+                const answer = await vscode.window.showWarningMessage(
+                    `Revert changes for ${displayFileName(filePath)}? Review pending changes and save any dirty editors first.`,
+                    { modal: true },
+                    'Revert',
+                    'Cancel'
+                );
 
-            if (answer !== 'Revert') {
-                return { status: 'cancelled', filePath, reason: 'Revert cancelled' } satisfies ActionResult;
-            }
+                if (answer !== 'Revert') {
+                    return { status: 'cancelled', filePath, reason: 'Revert cancelled' } satisfies ActionResult;
+                }
 
-            const result = reportAction(await diffTracker.revertFile(filePath, token));
-            if (result.status === 'success') {
-                void vscode.window.showInformationMessage('File reverted to original content');
-            }
-            return result;
+                const result = reportAction(await diffTracker.revertFile(filePath, token));
+                if (result.status === 'success') {
+                    void vscode.window.showInformationMessage('File reverted to original content');
+                }
+                return result;
+            });
         })
     );
 
     // Open the original file (not the diff view)
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.openOriginalFile', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.openOriginalFile', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
 
             if (!filePath) {
@@ -980,12 +992,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const uri = vscode.Uri.file(filePath);
             const doc = await vscode.workspace.openTextDocument(uri);
+            if (canOpen && !canOpen()) { return; }
             await vscode.window.showTextDocument(doc);
         })
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.openDiffDefault', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.openDiffDefault', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
             if (!filePath) {
                 return;
@@ -995,30 +1009,30 @@ export async function activate(context: vscode.ExtensionContext) {
             const defaultMode = getDefaultOpenMode();
 
             if (isDeleted && (defaultMode === 'original' || defaultMode === 'splitOriginalWebview')) {
-                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath);
+                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath, ...(canOpen ? [canOpen] : []));
                 return;
             }
 
             switch (defaultMode) {
                 case 'nativeReview':
                     // Preserve URI schemes and snapshot provenance for the adapter.
-                    await vscode.commands.executeCommand('diffTracker.nativeReview.openFile', filePathOrItem);
+                    await vscode.commands.executeCommand('diffTracker.nativeReview.openFile', filePathOrItem, ...(canOpen ? [canOpen] : []));
                     break;
                 case 'inline':
-                    await vscode.commands.executeCommand('diffTracker.showInlineDiff', filePath);
+                    await vscode.commands.executeCommand('diffTracker.showInlineDiff', filePath, ...(canOpen ? [canOpen] : []));
                     break;
                 case 'sideBySide':
-                    await vscode.commands.executeCommand('diffTracker.showSideBySideDiff', filePath);
+                    await vscode.commands.executeCommand('diffTracker.showSideBySideDiff', filePath, ...(canOpen ? [canOpen] : []));
                     break;
                 case 'original':
-                    await vscode.commands.executeCommand('diffTracker.openOriginalFile', filePath);
+                    await vscode.commands.executeCommand('diffTracker.openOriginalFile', filePath, ...(canOpen ? [canOpen] : []));
                     break;
                 case 'splitOriginalWebview':
-                    await vscode.commands.executeCommand('diffTracker.showOriginalAndWebviewSplit', filePath);
+                    await vscode.commands.executeCommand('diffTracker.showOriginalAndWebviewSplit', filePath, ...(canOpen ? [canOpen] : []));
                     break;
                 case 'webview':
                 default:
-                    await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath);
+                    await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath, ...(canOpen ? [canOpen] : []));
                     break;
             }
         })
@@ -1067,7 +1081,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffTracker.revertBlock', async (filePath: string, blockRef: string | number, token?: ReviewToken) => {
             if (!token) { return missingReview(filePath); }
-            return reportAction(await diffTracker.revertBlock(filePath, blockRef, token));
+            return reportAction(await withReviewNavigation(diffTracker, filePath, () => diffTracker.revertBlock(filePath, blockRef, token)));
         })
     );
 
@@ -1075,7 +1089,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffTracker.keepBlock', async (filePath: string, blockRef: string | number, token?: ReviewToken) => {
             if (!token) { return missingReview(filePath); }
-            return reportAction(await diffTracker.keepBlock(filePath, blockRef, token));
+            return reportAction(await withReviewNavigation(diffTracker, filePath, () => diffTracker.keepBlock(filePath, blockRef, token)));
         })
     );
 
@@ -1114,7 +1128,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffTracker.revertAllBlocksInFile', async (filePath: string, token?: ReviewToken) => {
             if (!token) { return missingReview(filePath); }
-            return reportAction(await diffTracker.revertFile(filePath, token));
+            return reportAction(await withReviewNavigation(diffTracker, filePath, () => diffTracker.revertFile(filePath, token)));
         })
     );
 
@@ -1122,7 +1136,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffTracker.keepAllBlocksInFile', async (filePath: string, token?: ReviewToken) => {
             if (!token) { return missingReview(filePath); }
-            return reportAction(await diffTracker.keepAllChangesInFile(filePath, token));
+            return reportAction(await withReviewNavigation(diffTracker, filePath, () => diffTracker.keepAllChangesInFile(filePath, token)));
         })
     );
 
@@ -1139,7 +1153,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Webview-based diff commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.showWebviewDiff', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.showWebviewDiff', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
 
             if (!filePath) {
@@ -1151,25 +1166,28 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('diffTracker.showOriginalAndWebviewSplit', async (filePathOrItem: string | any) => {
+        vscode.commands.registerCommand('diffTracker.showOriginalAndWebviewSplit', async (filePathOrItem: string | any, canOpen?: () => boolean) => {
+            if (canOpen && !canOpen()) { return; }
             const filePath = extractFilePath(filePathOrItem);
             if (!filePath) {
                 return;
             }
 
             if (isDeletedReview(filePath, filePathOrItem)) {
-                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath);
+                await vscode.commands.executeCommand('diffTracker.showWebviewDiff', filePath, ...(canOpen ? [canOpen] : []));
                 return;
             }
 
             const uri = vscode.Uri.file(filePath);
             const doc = await vscode.workspace.openTextDocument(uri);
+            if (canOpen && !canOpen()) { return; }
             await vscode.window.showTextDocument(doc, {
                 viewColumn: vscode.ViewColumn.One,
                 preserveFocus: true,
                 preview: false
             });
 
+            if (canOpen && !canOpen()) { return; }
             WebviewDiffPanel.createOrShow(
                 context.extensionUri,
                 diffTracker,
@@ -1254,6 +1272,24 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('diffTracker.excludeResource', async (item?: vscode.Uri | { filePath?: string; exclusionPath?: string }) => {
+            if (WatchExcludePanel.currentPanel) {
+                void vscode.window.showWarningMessage('Code Diff Tracker: Close Manage Monitoring Scope before using the quick exclusion so its draft is preserved.');
+                return;
+            }
+            const target = item instanceof vscode.Uri ? (item.scheme === 'file' ? item.fsPath : undefined)
+                : item?.exclusionPath ?? item?.filePath;
+            if (!target) { return; }
+            let directory = !!(item && !(item instanceof vscode.Uri) && item.exclusionPath);
+            try { directory = fs.lstatSync(target).isDirectory(); } catch { /* Deleted review files remain valid scope targets. */ }
+            const outcome = await monitoringScopeController.requestExcludeResource(target, directory);
+            if (outcome.status === 'saved' || outcome.status === 'alreadyExcluded') {
+                await openMonitoringScopeManager()?.applyInteractively();
+            } else {
+                void vscode.window.showInformationMessage(`Code Diff Tracker: ${outcome.reason ?? 'This path is already excluded by the requested monitoring scope.'}`);
+            }
+            return outcome;
+        }),
         vscode.commands.registerCommand('diffTracker.excludeCoverageSubtree', async (item?: string | { coveragePath?: string }) => {
             // An open scope editor may hold an unsaved JSON draft. Do not
             // mutate its backing settings behind the editor's current state.

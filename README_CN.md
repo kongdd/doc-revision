@@ -229,6 +229,8 @@ code --install-extension lengmh.code-diff-tracker
 | `diffTracker.webviewExpandUnchanged` | `false` | 新建 WebView 面板时是否展开全部未改动的上下文行 |
 | `diffTracker.openWebviewBeside` | `false` | 是否将 WebView Diff 打开到旁边的编辑器分组 |
 | `diffTracker.watchExclude` | `[]` | 不支持 `!` 否定的结构化显式排除；旧字符串规则在迁移前保留兼容语义 |
+| `diffTracker.onlyRecordReviewableText` | `false` | 按安全内容分类跳过新的不支持资源，保留既有待审内容和 Undo |
+| `diffTracker.autoOpenNextPendingFile` | `false` | 单文件审阅成功且无剩余待审内容后，自动打开下一个待审文件 |
 | `diffTracker.onlyTrackAutomatedChanges` | `false` | 记录外部及显式自动化改动；来源不明的编辑保留待审，不自动接受 |
 
 显示设置位于侧边栏 **Settings**。默认打开方式可从 **Display → Default open mode**、**Select Default Open Mode** 命令或 VS Code 设置修改；监控规则由 **Manage Monitoring Scope** 管理。
@@ -249,6 +251,12 @@ WebView 显示默认值也可从 **Settings → Display** 中的 **WebView defau
 默认仍为 `webview`。此设置与默认关闭的 `diffTracker.nativeQuickDiff` 分开。
 
 ## 仅跟踪自动化改动
+
+Recording 设置组提供「Only record reviewable text」和「Auto-open next pending file」开关。文本资格沿用现有 UTF-8、二进制内容和大小检查，无后缀文件也可记录。开启文本筛选不会清空已有待审内容或 Undo；未保存编辑、读取失败和覆盖缺口仍保留为未解决状态。此前跳过的资源变为文本后，需要通过「Reset Unknown Baseline (Current Disk State)」明确建立新基线；关闭筛选不会补造遗漏期间的历史。固定大小的保守标记会跨重启保留这一限制，也可能要求其他尚未追踪的路径重设基线。停止后继续冻结已保存的审阅内容。
+
+Explorer 和待审文件／目录右键菜单中的「Stop Recording This File or Folder」会保存精确排除请求，并打开现有范围 Apply 流程。丢弃范围内待审内容仍需明确确认，取消会保留待审内容。使用前须关闭未保存的范围编辑窗口。工作区根、名称有歧义的目录，以及无法用受限排除语法精确表示的路径，会被拒绝且不修改设置。
+
+自动前进按稳定的路径顺序，使用默认打开方式；末项处理完仍有较前的待审文件时会回到该文件，无剩余时保留当前编辑器。失败、过期、取消、暂停、仍有待审块、批量操作，以及操作期间主动切换焦点，都不会触发跳转。
 
 当 `diffTracker.onlyTrackAutomatedChanges` 为 `true` 时：
 

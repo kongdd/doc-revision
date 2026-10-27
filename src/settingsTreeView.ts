@@ -92,6 +92,8 @@ export class SettingsTreeDataProvider implements vscode.TreeDataProvider<Setting
             id: 'recording',
             label: 'Recording',
             items: [
+                { key: 'onlyRecordReviewableText', label: 'Only record reviewable text', defaultValue: false },
+                { key: 'autoOpenNextPendingFile', label: 'Auto-open next pending file', defaultValue: false },
                 { key: 'onlyTrackAutomatedChanges', label: 'Vibe Coding Only' },
                 { key: 'promptOnGitBranchChange', label: 'Prompt on Git branch change', defaultValue: false },
                 { key: 'autoStartRecording', label: 'Auto-start new workspaces', defaultValue: false }
