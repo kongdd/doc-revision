@@ -36,13 +36,13 @@ for (const [label, mutate] of [
         assert.throws(() => verifyReleaseMetadata(value));
     });
 }
-test('candidate matches consistent 0.8.9 source metadata and upgrades official 0.7.2', () => {
-    assert.equal(CANDIDATE_VERSION, '0.8.9');
+test('candidate matches current source metadata and upgrades official 0.7.2', () => {
     const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url)));
     const lock = JSON.parse(readFileSync(new URL('../../package-lock.json', import.meta.url)));
-    assert.equal(pkg.version, '0.8.9');
+    assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
     assert.equal(CANDIDATE_VERSION, pkg.version);
     assert.equal(RELEASE.tag, 'v0.7.2');
+    assert.notEqual(CANDIDATE_VERSION, RELEASE.tag.slice(1), 'the candidate must differ from its pinned upgrade source');
     assert.equal(lock.version, pkg.version);
     assert.equal(lock.packages[''].version, pkg.version);
 });

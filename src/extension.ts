@@ -1282,12 +1282,20 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!target) { return; }
             let directory = !!(item && !(item instanceof vscode.Uri) && item.exclusionPath);
             try { directory = fs.lstatSync(target).isDirectory(); } catch { /* Deleted review files remain valid scope targets. */ }
-            const outcome = await monitoringScopeController.requestExcludeResource(target, directory);
-            if (outcome.status === 'saved' || outcome.status === 'alreadyExcluded') {
-                await openMonitoringScopeManager()?.applyInteractively();
-            } else {
-                void vscode.window.showInformationMessage(`Code Diff Tracker: ${outcome.reason ?? 'This path is already excluded by the requested monitoring scope.'}`);
+            const outcome = await monitoringScopeController.excludeResource(target, directory, async paths => {
+                const answer = await vscode.window.showWarningMessage(
+                    `Stop recording this ${directory ? 'folder' : 'file'} and discard ${paths.length} pending review item(s)?`,
+                    { modal: true, detail: `${target}\n\nWorkspace files will not be modified. Other reviews and baselines are preserved.\n${paths.slice(0, 20).join('\n')}` },
+                    'Discard Reviews and Stop Recording'
+                );
+                return answer === 'Discard Reviews and Stop Recording';
+            });
+            if (outcome.status === 'applied') {
+                void vscode.window.showInformationMessage(`Code Diff Tracker: ${outcome.reason ?? 'Stopped recording the selected path. Workspace files and unrelated reviews are unchanged.'}`);
+            } else if (outcome.status !== 'cancelled') {
+                void vscode.window.showInformationMessage(`Code Diff Tracker: ${outcome.reason ?? 'This path is already excluded by the effective monitoring scope.'}`);
             }
+            settingsTreeDataProvider.refresh();
             return outcome;
         }),
         vscode.commands.registerCommand('diffTracker.excludeCoverageSubtree', async (item?: string | { coveragePath?: string }) => {

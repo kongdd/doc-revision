@@ -800,6 +800,35 @@ module.exports = async function runExtensionHostScenario() {
             .baselineFingerprint, fingerprint(recheckOpaqueBaseline));
         console.log('PASS HOST-RECHECK public command preserves baseline and pending text/opaque reviews, then observes native edits');
 
+
+        // A saved manual exclusion still embargoes reads until Apply/Restore.
+        // Withdraw it without accepting the captured text or opaque before-image,
+        // then repair the legacy control gaps using the real public Recheck.
+        const savedExclude = scopeConfig.inspect('watchExclude')?.workspaceValue;
+        const originalReview = projectPending(await state());
+        await scopeConfig.update('watchExclude', [...(savedExclude ?? []),
+            { scope: 'folder', folder: primaryFolder.name, pattern: '/dist/s4b-blind/' }], vscode.ConfigurationTarget.Workspace);
+        await untilStable('manual exclusion pauses existing review', async () =>
+            (await state()).trackedChanges.find(item => item.filePath === uri('dist/s4b-blind/changed.txt').fsPath)?.reviewKind === 'unknown');
+        await scopeConfig.update('watchExclude', savedExclude, vscode.ConfigurationTarget.Workspace);
+        await untilStable('manual exclusion withdrawn before recovery', async () => {
+            const status = await vscode.commands.executeCommand('diffTracker._testMonitoringScopeStatus');
+            return status.requested.ok && status.effective.kind === 'configured' &&
+                status.requested.scope.scopeRevision === status.effective.scopeRevision;
+        });
+        const scopeRecovered = await vscode.commands.executeCommand('diffTracker.recheckObservationCoverage');
+        assert.equal(scopeRecovered?.status, 'rechecked', JSON.stringify(scopeRecovered));
+        const afterScopeRecovery = await state();
+        assert.deepEqual(projectPending(afterScopeRecovery), originalReview,
+            'repairing withdrawn control gaps must not accept or discard original text/opaque review');
+        assert.equal(afterScopeRecovery.coverageGaps.some(([target]) => recheckPaths.includes(target)), false);
+        fs.writeFileSync(path.join(s4bBlindDir, 'changed.txt'), 'native edit after withdrawn scope recovery\n');
+        await untilStable('repaired scope observes later native edit', async () =>
+            (await pending('dist/s4b-blind/changed.txt'))?.currentContent === 'native edit after withdrawn scope recovery\n');
+        assert.equal(await vscode.commands.executeCommand('diffTracker._testOriginalContent',
+            uri('dist/s4b-blind/changed.txt').fsPath), 's4b changed baseline\n');
+        console.log('PASS HOST-SCOPE-RECOVERY withdrawn exclusion repairs text/opaque reviews without replacing original baselines');
+
         for (const operation of ['reset', 'repository rebuild', 'Stop/Start']) {
             if (operation === 'reset') {
                 assert.equal(await vscode.commands.executeCommand('diffTracker._testClearDiffs'), true);
