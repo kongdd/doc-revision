@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.10
 
 - Confirm quick file/folder exclusions before saving settings; cancellation preserves review state, concurrent changes invalidate consent, and failed Apply compensates only its own still-current request.
 - Let Recheck Observation Coverage recover withdrawn pending-exclusion control gaps against original baselines without accepting changes or bypassing real coverage failures.
