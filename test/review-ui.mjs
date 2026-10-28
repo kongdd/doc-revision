@@ -469,7 +469,8 @@ function coverageExclusionHarness(){
             return write;
         }
     });
-    const roots=[{name:folder.name,uri:folder.uri.toString(),caseSensitive:true}];
+    const roots=[{name:folder.name,uri:folder.uri.toString(),
+        caseSensitive:h.load('utils/pathIdentity.ts').detectLocalPathCaseSensitivity(root)}];
     const effective={kind:'configured',...h.load('monitoringScope.ts').validateAndCanonicalizeScope({
         mode:h.state.workspaceConfiguration.monitoringScope,
         includes:h.state.workspaceConfiguration.watchInclude,
@@ -2159,6 +2160,10 @@ function quickExclusionHarness() {
         toString() { return `file://${this.fsPath}`; }
     };
     const target = h.targets[0];
+    assert.equal(h.controller.getStatus().requested.scope?.scopeRevision,
+        h.tracker.getEffectiveMonitoringScope().scopeRevision,
+        'fixture must begin from the actual host filesystem case semantics, with no pending request');
+    assert.equal(h.state.pendingScope, undefined, 'initial fixture must not manufacture pending scope');
     h.state.changes = [{ filePath: path.join(target, 'pending.txt'), reviewKind: 'text', currentContent: 'pending' }];
     h.state.epoch = 1;
     let effective = h.tracker.getEffectiveMonitoringScope();
