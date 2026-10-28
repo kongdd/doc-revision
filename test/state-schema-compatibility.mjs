@@ -534,7 +534,7 @@ export function registerStateSchemaCompatibility(harness) {
         assert.equal(tracker.getReviewToken(target), undefined);
     });
 
-    test('SCHEMA-V5 pending explicit exclusion preserves the frozen review as unknown', async () => {
+    test('SCHEMA-V5 pending explicit exclusion preserves stopped text review without importing later disk edits', async () => {
         const target = file('pending-exclude.txt');
         fs.writeFileSync(target, 'changed while pending\n');
         const storage = file('pending-exclude-storage');
@@ -565,8 +565,17 @@ export function registerStateSchemaCompatibility(harness) {
         setTracker(tracker);
         assert.equal(await tracker.restorePersistedState(), 'restored');
         tracker.setPendingMonitoringScope(pendingScope);
-        assert.equal(pending(target)?.reviewKind, 'unknown');
+        assert.equal(pending(target)?.reviewKind, 'text');
+        assert.equal(pending(target)?.currentContent, 'pending at Stop\n');
+        assert.equal(tracker.getOriginalContent(target), 'baseline\n');
+        assert.deepEqual(tracker.getCoverageGaps(), []);
         assert.deepEqual(tracker.getExplicitlyExcludedPendingReviewPaths(pendingScope), [target]);
+        tracker.setPendingMonitoringScope(undefined);
+        assert.equal(pending(target)?.currentContent, 'pending at Stop\n');
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const saved = JSON.parse(fs.readFileSync(path.join(storage, 'session-state.json'), 'utf8'));
+        assert.equal(saved.stoppedReviews.find(review => review.filePath === target)?.reviewKind, 'text');
+        assert.deepEqual(saved.coverageGaps, []);
     });
 
     for (const version of [4, 5]) test(`SCHEMA-V${version} requires effective scope, retained reviews and coverage gaps`, async () => {

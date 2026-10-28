@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Confirm quick file/folder exclusions before saving settings; cancellation preserves review state, concurrent changes invalidate consent, and failed Apply compensates only its own still-current request.
+- Let Recheck Observation Coverage recover withdrawn pending-exclusion control gaps against original baselines without accepting changes or bypassing real coverage failures.
+- Preserve stopped review snapshots when scope settings change, and retain file/editor events that invalidate an in-flight coverage repair.
+
 ## 0.8.9
 
 - Add `diffTracker.onlyRecordReviewableText`, disabled by default, to skip new binary, unsupported-encoding and oversized resources using safe content classification. Preserve existing baselines, pending reviews and Undo; previously skipped content requires an explicit trustworthy baseline before text review.

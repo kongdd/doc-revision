@@ -1,3 +1,4 @@
+import { registerScopeExclusionRecovery } from './scope-exclusion-recovery.mjs';
 import { registerPR12RuntimeBudgetRegressions } from './pr12-runtime-identity-budget.mjs';
 import { registerPR12LiteralEntryRegressions } from './pr12-literal-entry-regressions.mjs';
 import { registerS4BSupplementalCoverage } from './s4b-supplemental-coverage.mjs';
@@ -49,6 +50,7 @@ export function registerPR12BoundedInvariants(h) {
     registerS4BSupplementalCoverage(h, fixture, scopeFor);
     registerS4CImportHandoff(h, fixture);
     registerRecheckObservationCoverage(h, fixture);
+    registerScopeExclusionRecovery(h, fixture, scopeFor);
     const serialized=tracker=>Buffer.byteLength(JSON.stringify(tracker.buildPersistedState()),'utf8');
     const unresolvedPlan=reason=>({kind:'unresolved',reason});
 

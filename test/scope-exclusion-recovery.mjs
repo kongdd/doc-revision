@@ -1,0 +1,353 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import Module, { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+
+// Exercise the production tracker through the normal pause/withdraw/recheck
+// paths. The shared fixture mocks VS Code, not scope or review algorithms.
+export function registerScopeExclusionRecovery(h, fixture, scopeFor) {
+    const { test, Uri, DiffTracker, setTracker, vscode } = h;
+    async function paused(context) {
+        const { tracker, dir, scope } = context;
+        const subtree = path.join(dir, 'work-turns');
+        fs.mkdirSync(subtree);
+        const changed = path.join(subtree, 'changed.txt');
+        const clean = path.join(subtree, 'clean.txt');
+        const deleted = path.join(subtree, 'deleted.txt');
+        const other = path.join(dir, 'other.txt');
+        for (const file of [changed, clean, deleted, other]) { fs.writeFileSync(file, 'original'); }
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        for (const file of [changed, other]) {
+            fs.writeFileSync(file, 'pending');
+            await tracker.readFileAndUpdate(file, Uri.file(file));
+        }
+        const originalOther = tracker.getReviewToken(other);
+        tracker.setPendingMonitoringScope(scopeFor(tracker, 'wholeWorkspace', [{ scope: 'all', pattern: '/work-turns/' }]));
+        fs.writeFileSync(changed, 'changed during pause');
+        fs.unlinkSync(deleted);
+        tracker.setPendingMonitoringScope(undefined);
+        assert.equal(tracker.getTrackedChange(changed)?.reviewKind, 'unknown');
+        assert.equal((await tracker.resetUnknownBaseline(changed)).status, 'conflict');
+        return { subtree, changed, clean, deleted, other, originalOther };
+    }
+
+    for (const reload of [false, true]) test(`SCOPE-RECOVERY withdrawn exclusion reconciles original baselines (reload=${reload})`, () => fixture(async context => {
+        const files = await paused(context);
+        let tracker = context.tracker;
+        if (reload) {
+            const storage = tracker.storageUri;
+            assert.equal(await tracker.flushPendingPersistence(), true);
+            await tracker.dispose();
+            tracker = new DiffTracker(storage); setTracker(tracker);
+            assert.equal(await tracker.restorePersistedState(), 'restored');
+        }
+        const otherToken = tracker.getReviewToken(files.other);
+        const result = await tracker.recheckObservationCoverage();
+        assert.equal(result.status, 'rechecked', JSON.stringify(result));
+        assert.equal(tracker.getOriginalContent(files.changed), 'original');
+        assert.equal(tracker.getTrackedChange(files.changed)?.reviewKind, 'text');
+        assert.equal(tracker.getTrackedChange(files.changed)?.currentContent, 'changed during pause');
+        assert.equal(tracker.getTrackedChange(files.clean), undefined, 'clean baselines must not remain phantom reviews');
+        assert.equal(tracker.getTrackedChange(files.deleted)?.isDeleted, true);
+        assert.deepEqual(tracker.getReviewToken(files.other), otherToken);
+        assert.equal(tracker.getOriginalContent(files.other), 'original');
+        assert.equal(fs.readFileSync(files.changed, 'utf8'), 'changed during pause');
+        assert.equal(fs.existsSync(files.deleted), false);
+        assert.deepEqual(tracker.getCoverageGaps(), []);
+        assert.equal(await tracker.flushPendingPersistence(), true);
+        const saved = JSON.parse(fs.readFileSync(path.join(tracker.storageUri.fsPath, 'session-state.json'), 'utf8'));
+        assert.equal(new Map(saved.fileSnapshots).get(files.changed), 'original');
+        assert.deepEqual(saved.coverageGaps, []);
+    }));
+
+    test('SCOPE-RECOVERY unknown before-image stays unknown after observation repair and requires explicit Reset', () => fixture(async context => {
+        const { tracker, dir, scope } = context;
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        tracker.setPendingMonitoringScope(scopeFor(tracker, 'wholeWorkspace', [{ scope: 'all', pattern: '/unseen.txt' }]));
+        const target = path.join(dir, 'unseen.txt');
+        fs.writeFileSync(target, 'unobserved content');
+        await tracker.onExternalFileCreated(Uri.file(target));
+        tracker.setPendingMonitoringScope(undefined);
+        assert.equal(tracker.getOriginalContent(target), undefined);
+        assert.equal((await tracker.recheckObservationCoverage()).status, 'rechecked');
+        assert.equal(tracker.getTrackedChange(target)?.reviewKind, 'unknown');
+        assert.equal(tracker.getOriginalContent(target), undefined, 'Recheck is not Accept or Reset');
+        assert.equal((await tracker.resetUnknownBaseline(target)).status, 'success');
+        assert.equal(tracker.getOriginalContent(target), 'unobserved content');
+    }));
+
+    test('SCOPE-RECOVERY real file gaps are not blanket-cleared with withdrawn exclusion markers', () => fixture(async context => {
+        const files = await paused(context);
+        const { tracker } = context;
+        tracker.setFileCoverageGap(files.other, 'file-read-failed', 'Independent unverified read');
+        tracker.markFileUnavailable(files.other, 'Independent unverified read');
+        assert.equal((await tracker.recheckObservationCoverage()).status, 'limited');
+        assert.equal(tracker.coverageGaps.get(files.other)?.file?.reasonCode, 'file-read-failed');
+        assert.equal(tracker.getTrackedChange(files.changed)?.reviewKind, 'text');
+        assert.equal(tracker.getTrackedChange(files.other)?.reviewKind, 'unknown');
+        assert.equal((await tracker.resetUnknownBaseline(files.other)).status, 'conflict');
+    }));
+
+    for (const blocked of ['stopped', 'dirty', 'pending']) test(`SCOPE-RECOVERY refuses ${blocked} without consuming legacy evidence`, () => fixture(async context => {
+        const files = await paused(context);
+        const { tracker } = context;
+        if (blocked === 'stopped') { tracker.stopRecording(); }
+        if (blocked === 'pending') { tracker.setPendingMonitoringScope(scopeFor(tracker, 'wholeWorkspace', [{ scope: 'all', pattern: '/work-turns/' }])); }
+        if (blocked === 'dirty') { vscode.workspace.textDocuments.push({ uri: Uri.file(files.changed), isDirty: true }); }
+        const gaps = JSON.stringify(tracker.getCoverageGaps());
+        const review = JSON.stringify(tracker.getTrackedChanges());
+        try {
+            assert.equal((await tracker.recheckObservationCoverage()).status, 'conflict');
+            assert.equal(JSON.stringify(tracker.getCoverageGaps()), gaps);
+            assert.equal(JSON.stringify(tracker.getTrackedChanges()), review);
+            assert.equal(tracker.getOriginalContent(files.changed), 'original');
+        } finally { if (blocked === 'dirty') { vscode.workspace.textDocuments.pop(); } }
+    }));
+    async function withController(tracker, scope, run) {
+        const oldConfig = vscode.workspace.getConfiguration;
+        const oldEvent = vscode.workspace.onDidChangeConfiguration;
+        const handlers = [];
+        const config = { monitoringScope: scope.mode, watchInclude: scope.includes, watchExclude: scope.excludes };
+        const writes = [];
+        const settings = new Map();
+        vscode.workspace.onDidChangeConfiguration = handler => { handlers.push(handler); return { dispose() {} }; };
+        vscode.workspace.getConfiguration = (...args) => ({
+            ...oldConfig(...args),
+            get: (key, fallback) => Object.hasOwn(config, key) ? config[key] : oldConfig(...args).get(key, fallback),
+            inspect: key => ({ workspaceValue: config[key] }),
+            update: async (key, value) => {
+                writes.push([key, value]);
+                await new Promise(resolve => setImmediate(resolve));
+                config[key] = structuredClone(value);
+                h.fireConfigurationChanged(`diffTracker.${key}`);
+                for (const handler of handlers) { handler({ affectsConfiguration: name => name === `diffTracker.${key}` }); }
+            }
+        });
+        const oldLoad = Module._load;
+        let Controller;
+        try {
+            Module._load = function(id, ...args) { return id === 'vscode' ? vscode : oldLoad.call(this, id, ...args); };
+            Controller = require('../out/monitoringScopeController.js').MonitoringScopeController;
+        } finally { Module._load = oldLoad; }
+        const controller = new Controller({ workspaceState: {
+            get: key => settings.get(key), update: async (key, value) => { settings.set(key, value); }
+        } }, tracker);
+        try { await run({ controller, config, writes }); }
+        finally {
+            controller.dispose();
+            await tracker.ignoreRefreshPromise;
+            vscode.workspace.getConfiguration = oldConfig;
+            vscode.workspace.onDidChangeConfiguration = oldEvent;
+        }
+    }
+
+    for (const stopped of [false, true]) test(`SCOPE-RECOVERY real controller quick Cancel preserves clean baselines and actual review (stopped=${stopped})`, () => fixture(async context => {
+        const { tracker, dir, scope } = context;
+        const subtree = path.join(dir, 'work-turns'); fs.mkdirSync(subtree);
+        const changed = path.join(subtree, 'changed.txt'), clean = path.join(subtree, 'clean.txt');
+        fs.writeFileSync(changed, 'original'); fs.writeFileSync(clean, 'clean');
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        fs.writeFileSync(changed, 'pending'); await tracker.readFileAndUpdate(changed, Uri.file(changed));
+        if (stopped) { tracker.stopRecording(); }
+        const token = tracker.getReviewToken(changed);
+        await withController(tracker, scope, async ({ controller, writes }) => {
+            const result = await controller.excludeResource(subtree, true, async paths => {
+                assert.deepEqual(paths, [changed], 'unchanged files are not pending review');
+                assert.equal(writes.length, 0);
+                assert.equal(tracker.getTrackedChange(changed)?.reviewKind, 'text');
+                return false;
+            });
+            assert.equal(result.status, 'cancelled');
+            assert.equal(writes.length, 0);
+            assert.deepEqual(tracker.getReviewToken(changed), token);
+            assert.equal(tracker.getTrackedChange(clean), undefined);
+            assert.deepEqual(tracker.getCoverageGaps(), []);
+        });
+    }));
+
+    for (const scenario of ['pending', 'clean', 'legacy-gap', 'save-failure']) test(`SCOPE-RECOVERY real controller quick exclusion ${scenario} is scoped and rollback-safe`, () => fixture(async context => {
+        const { tracker, dir, scope } = context;
+        const subtree = path.join(dir, 'work-turns'); fs.mkdirSync(subtree);
+        const target = path.join(subtree, 'selected.txt'), other = path.join(dir, 'other.txt');
+        fs.writeFileSync(target, 'original'); fs.writeFileSync(other, 'outside');
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        fs.writeFileSync(other, 'outside edit'); await tracker.readFileAndUpdate(other, Uri.file(other));
+        if (scenario !== 'clean') { fs.writeFileSync(target, 'selected edit'); await tracker.readFileAndUpdate(target, Uri.file(target)); }
+        if (scenario === 'legacy-gap') {
+            tracker.setPendingMonitoringScope(scopeFor(tracker, 'wholeWorkspace', [{ scope: 'all', pattern: '/work-turns/' }]));
+            tracker.setPendingMonitoringScope(undefined);
+        }
+        const otherToken = tracker.getReviewToken(other);
+        const before = structuredClone(tracker.getTrackedChanges());
+        const commit = tracker.commitPreparedScopePersistence;
+        if (scenario === 'save-failure') { tracker.commitPreparedScopePersistence = async () => false; }
+        try {
+            await withController(tracker, scope, async ({ controller, config }) => {
+                let prompts = 0;
+                const result = await controller.excludeResource(subtree, true, async paths => {
+                    prompts++; assert.deepEqual(paths, [target]); return true;
+                });
+                assert.equal(result.status, scenario === 'save-failure' ? 'failed' : 'applied', JSON.stringify(result));
+                assert.equal(prompts, scenario === 'clean' ? 0 : 1);
+                assert.deepEqual(tracker.getReviewToken(other), otherToken);
+                assert.equal(tracker.getOriginalContent(other), 'outside');
+                if (scenario === 'save-failure') {
+                    assert.deepEqual(config.watchExclude, scope.excludes);
+                    assert.deepEqual(tracker.getTrackedChanges(), before);
+                    assert.equal(tracker.getOriginalContent(target), 'original');
+                } else {
+                    assert.equal(tracker.getTrackedChange(target), undefined);
+                    assert.equal(tracker.getOriginalContent(target), undefined);
+                    assert.equal(config.watchExclude.some(rule => rule.pattern === '/work-turns/'), true);
+                    assert.equal((await controller.excludeResource(subtree, true, async () => { throw new Error('unexpected second prompt'); })).status, 'alreadyExcluded');
+                }
+                assert.deepEqual(tracker.getCoverageGaps(), []);
+                assert.equal(fs.readFileSync(other, 'utf8'), 'outside edit');
+            });
+        } finally { tracker.commitPreparedScopePersistence = commit; }
+    }));
+
+    test('SCOPE-RECOVERY manual pending settings must not manufacture Unknown in a stopped frozen review', () => fixture(async context => {
+        const { tracker, dir, scope } = context;
+        const target = path.join(dir, 'frozen.txt'); fs.writeFileSync(target, 'original');
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        fs.writeFileSync(target, 'pending'); await tracker.readFileAndUpdate(target, Uri.file(target));
+        tracker.stopRecording();
+        const frozen = structuredClone(tracker.getTrackedChanges());
+        tracker.setPendingMonitoringScope(scopeFor(tracker, 'wholeWorkspace', [{ scope: 'all', pattern: '/frozen.txt' }]));
+        assert.deepEqual(tracker.getTrackedChanges(), frozen);
+        tracker.setPendingMonitoringScope(undefined);
+        assert.deepEqual(tracker.getTrackedChanges(), frozen);
+        assert.deepEqual(tracker.getCoverageGaps(), []);
+    }));
+
+    for (const disturbance of ['dirty-editor', 'event', 'document-event', 'delete-event', 'unreadable', 'retirement-save'])
+    test(`SCOPE-RECOVERY ${disturbance} during recovery cannot certify stale evidence`, () => fixture(async context => {
+        const files = await paused(context);
+        const { tracker } = context;
+        const read = tracker.readCurrentFileState;
+        const write = vscode.workspace.fs.writeFile;
+        let injected = false;
+        tracker.readCurrentFileState = async function(target, ...args) {
+            const result = await read.call(this, target, ...args);
+            if (target === files.changed && !injected && disturbance !== 'retirement-save') {
+                injected = true;
+                if (disturbance === 'dirty-editor') {
+                    vscode.workspace.textDocuments.push({ uri: Uri.file(target), isDirty: true });
+                } else if (['event', 'document-event', 'delete-event'].includes(disturbance)) {
+                    fs.writeFileSync(target, 'changed during certification');
+                    if (disturbance === 'document-event') {
+                        tracker.onDocumentChanged({ document: { uri: Uri.file(target), isDirty: false } });
+                    } else if (disturbance === 'delete-event') {
+                        fs.unlinkSync(target); await tracker.onExternalFileDeleted(Uri.file(target));
+                    } else { await tracker.onExternalFileChanged(Uri.file(target)); }
+                } else { return { kind: 'unavailable', reason: 'injected unreadable resource' }; }
+            }
+            return result;
+        };
+        if (disturbance === 'retirement-save') {
+            vscode.workspace.fs.writeFile = async (uri, bytes) => {
+                if (!injected && path.basename(uri.fsPath) === 'session-state.tmp.json') {
+                    const candidate = JSON.parse(Buffer.from(bytes).toString());
+                    if (!candidate.coverageGaps.some(([target, record]) => target === files.changed && record.file)) {
+                        injected = true;
+                        throw new Error('injected control-gap retirement failure');
+                    }
+                }
+                return write(uri, bytes);
+            };
+        }
+        try {
+            const result = await tracker.recheckObservationCoverage();
+            assert.notEqual(result.status, 'rechecked', JSON.stringify(result));
+            assert.equal(injected, true);
+            assert.ok(tracker.coverageGaps.get(files.changed)?.file, 'unproven control gap stays recoverable');
+            assert.equal(tracker.getTrackedChange(files.changed)?.reviewKind, 'unknown');
+            assert.equal(tracker.getOriginalContent(files.changed), 'original');
+            assert.equal((await tracker.resetUnknownBaseline(files.changed)).status, 'conflict');
+        } finally {
+            tracker.readCurrentFileState = read;
+            vscode.workspace.fs.writeFile = write;
+            if (disturbance === 'dirty-editor') { vscode.workspace.textDocuments.pop(); }
+        }
+        if (disturbance !== 'retirement-save') {
+            assert.equal((await tracker.recheckObservationCoverage()).status, 'rechecked');
+            assert.equal(tracker.getOriginalContent(files.changed), 'original');
+            if (disturbance === 'delete-event') { assert.equal(tracker.getTrackedChange(files.changed)?.isDeleted, true); }
+            else { assert.equal(tracker.getTrackedChange(files.changed)?.currentContent,
+                ['event', 'document-event'].includes(disturbance) ? 'changed during certification' : 'changed during pause'); }
+        }
+    }));
+
+    for (const failed of [false, true])
+    test(`SCOPE-RECOVERY control subtree requires working direct observation (failure=${failed})`, () => fixture(async context => {
+        const files = await paused(context);
+        const { tracker } = context;
+        h.setVsCodeExcludes({ 'files.watcherExclude': { 'work-turns/**': true } });
+        tracker.setSubtreeCoverageGap(files.subtree, 'pending-scope-gap', 'Pending scope reconciliation remains required');
+        // Real production installer and scan; only the native watch factory is
+        // fault-injected. A wrapped pending code cannot hide ENOSPC.
+        const watch = fs.watch;
+        if (failed) {
+            fs.watch = (target, ...args) => {
+                if (path.resolve(String(target)) === files.subtree) {
+                    throw Object.assign(new Error('injected native watcher limit'), { code: 'ENOSPC' });
+                }
+                return watch(target, ...args);
+            };
+        }
+        try {
+            const result = await tracker.recheckObservationCoverage();
+            assert.equal(result.status, failed ? 'limited' : 'rechecked', JSON.stringify(result));
+            assert.equal(tracker.getOriginalContent(files.changed), 'original');
+            if (failed) {
+                assert.ok(tracker.coverageGaps.get(files.changed)?.file);
+                assert.ok(tracker.getSubtreeCoverageGaps().some(gap => gap.targetPath === files.subtree));
+                assert.equal((await tracker.resetUnknownBaseline(files.changed)).status, 'conflict');
+            } else {
+                assert.equal(tracker.getTrackedChange(files.changed)?.reviewKind, 'text');
+                assert.deepEqual(tracker.getCoverageGaps(), []);
+                const owner = [...h.nativeDirectoryWatchers].reverse().find(item => item.active && item.directory === files.subtree);
+                assert.ok(owner);
+                fs.writeFileSync(files.changed, 'native follow-up');
+                owner.listener('change', 'changed.txt');
+                await h.waitUntil(() => tracker.getTrackedChange(files.changed)?.currentContent === 'native follow-up');
+                assert.equal(tracker.getOriginalContent(files.changed), 'original');
+            }
+        } finally { fs.watch = watch; }
+    }));
+
+    for (const situation of ['duplicate', 'kind-change', 'new-review', 'postcommit-preference'])
+    test(`SCOPE-RECOVERY quick exclusion ${situation} keeps consent bound to the actual operation`, () => fixture(async context => {
+        const { tracker, dir, scope } = context;
+        const target = path.join(dir, 'chosen.txt'); fs.writeFileSync(target, 'original');
+        assert.equal((await tracker.applyConfiguredMonitoringScope(scope)).status, 'applied');
+        fs.writeFileSync(target, 'pending'); await tracker.readFileAndUpdate(target, Uri.file(target));
+        await withController(tracker, scope, async ({ controller, config, writes }) => {
+            if (situation === 'postcommit-preference') {
+                controller.clearDismissedConsent = async () => { throw new Error('injected preference failure'); };
+            }
+            const result = await controller.excludeResource(target, false, async paths => {
+                assert.deepEqual(paths, [target]);
+                assert.equal(writes.length, 0);
+                if (situation === 'duplicate') {
+                    assert.equal((await controller.excludeResource(target, false, async () => true)).status, 'conflict');
+                    assert.equal((await controller.applyPendingScope()).status, 'conflict');
+                } else if (situation === 'kind-change') {
+                    fs.unlinkSync(target); fs.mkdirSync(target);
+                } else if (situation === 'new-review') {
+                    fs.writeFileSync(target, 'newer pending'); await tracker.readFileAndUpdate(target, Uri.file(target));
+                }
+                return true;
+            });
+            const applied = situation === 'duplicate' || situation === 'postcommit-preference';
+            assert.equal(result.status, applied ? 'applied' : 'conflict', JSON.stringify(result));
+            assert.equal(writes.length, applied ? 1 : 0);
+            assert.equal(config.watchExclude.some(rule => rule.pattern === '/chosen.txt'), applied);
+            assert.equal(tracker.getOriginalContent(target), applied ? undefined : 'original');
+            if (situation === 'postcommit-preference') { assert.match(result.reason, /preference/); }
+        });
+    }));
+
+}

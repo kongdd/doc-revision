@@ -536,7 +536,7 @@ function monitoringScopeCommandHarness() {
     vm.runInNewContext(ts.transpileModule(code, {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
     }).outputText, {
-        vscode: h.vscode, WatchExcludePanel, diffTracker: h.tracker,
+        fs, vscode: h.vscode, WatchExcludePanel, diffTracker: h.tracker,
         monitoringScopeController: h.controller,
         context: { extensionUri: { fsPath: '/extension' }, subscriptions: [] },
         settingsTreeDataProvider: { refresh() {} }
@@ -2147,6 +2147,102 @@ await test('auto-next cancels after opening and closing an active webview tab',a
         changes=changes.slice(1);return{status:'success',filePath:'/a'};
     });
     assert.equal(h.commands.length,0,'an intervening active webview must permanently cancel navigation');
+});
+
+
+function quickExclusionHarness() {
+    const h = monitoringScopeCommandHarness();
+    h.vscode.Uri = class {
+        constructor(fsPath) { this.fsPath = fsPath; this.scheme = 'file'; }
+        static file(p) { return new this(p); }
+        static joinPath(uri, ...parts) { return new this(path.join(uri.fsPath, ...parts)); }
+        toString() { return `file://${this.fsPath}`; }
+    };
+    const target = h.targets[0];
+    h.state.changes = [{ filePath: path.join(target, 'pending.txt'), reviewKind: 'text', currentContent: 'pending' }];
+    h.state.epoch = 1;
+    let effective = h.tracker.getEffectiveMonitoringScope();
+    h.tracker.getEffectiveMonitoringScope = () => effective;
+    h.tracker.getExplicitlyExcludedPendingReviewPaths = () => h.state.changes.map(item => item.filePath);
+    h.tracker.getExplicitlyExcludedReviewRevision = () => JSON.stringify([h.state.epoch, h.state.changes]);
+    h.tracker.setPendingMonitoringScope = scope => {
+        h.state.pendingScope = scope;
+        if (scope) { h.state.changes.forEach(item => { item.reviewKind = 'unknown'; }); }
+    };
+    h.state.afterConfigurationUpdate = () => h.controller.reconcileRequestedScope();
+    h.tracker.applyConfiguredMonitoringScope = async (scope, discard, current, revision) => {
+        h.state.applies++;
+        assert.equal(current(), true);
+        assert.equal(revision, h.tracker.getExplicitlyExcludedReviewRevision(scope));
+        if (h.state.applyFailure) { return { status: 'failed', reason: 'injected save failure' }; }
+        assert.equal(discard, h.state.changes.length > 0);
+        effective = { kind: 'configured', ...scope };
+        h.state.changes = [];
+        return { status: 'applied' };
+    };
+    // Model the old panel's confirmation too so this is a red regression on
+    // v0.8.9 rather than merely an assertion about a newly added method.
+    h.controller.applyPendingScope = async () => ({ status: 'needsDiscardConfirmation', affectedReviewPaths: h.state.changes.map(item => item.filePath) });
+    h.state.dialogs = [];
+    h.vscode.window.showWarningMessage = async (message, options, ...buttons) => {
+        h.state.dialogs.push({ message, options, buttons });
+        if (options?.modal) { await h.state.duringConfirmation?.(); return h.state.confirm ? buttons[0] : undefined; }
+        return undefined;
+    };
+    return { ...h, target, exclude: () => h.run('excludeResource', { exclusionPath: target }) };
+}
+
+await test('QUICK-EXCLUSION Cancel does not save settings, pause reads, create Unknown or open a scope editor', async () => {
+    const h = quickExclusionHarness();
+    const before = structuredClone(h.state.changes);
+    await h.exclude();
+    assert.equal(h.state.updates.length, 0);
+    assert.deepEqual(h.state.changes, before);
+    assert.equal(h.state.pendingScope, undefined);
+    assert.equal(h.state.applies, 0);
+    assert.equal(h.state.createdPanels.length, 0);
+});
+
+for (const change of ['settings', 'review', 'lifecycle']) await test(`QUICK-EXCLUSION ${change} changing during confirmation cannot consume stale approval`, async () => {
+    const h = quickExclusionHarness(); h.state.confirm = true;
+    h.state.duringConfirmation = () => {
+        if (change === 'settings') { h.state.workspaceConfiguration.watchExclude.push({ scope: 'all', pattern: '/unrelated/' }); }
+        if (change === 'review') { h.state.changes[0].currentContent = 'newer edit'; }
+        if (change === 'lifecycle') { h.state.epoch++; }
+    };
+    await h.exclude();
+    assert.equal(h.state.updates.length, 0);
+    assert.equal(h.state.applies, 0);
+    assert.equal(h.state.changes[0].reviewKind, 'text');
+});
+
+await test('QUICK-EXCLUSION approved target is applied once without synthetic Unknown or second confirmation', async () => {
+    const h = quickExclusionHarness(); h.state.confirm = true;
+    await h.exclude();
+    assert.equal(h.state.applies, 1);
+    assert.equal(h.state.dialogs.filter(item => item.options?.modal).length, 1);
+    assert.deepEqual(h.state.changes, []);
+    assert.equal(h.state.pendingScope, undefined);
+    assert.equal(h.state.createdPanels.length, 0);
+});
+
+await test('QUICK-EXCLUSION failed Apply restores its own settings without consuming pending review', async () => {
+    const h = quickExclusionHarness(); h.state.confirm = true; h.state.applyFailure = true;
+    const configuration = structuredClone(h.state.workspaceConfiguration);
+    const review = structuredClone(h.state.changes);
+    await h.exclude();
+    assert.deepEqual(h.state.workspaceConfiguration, configuration);
+    assert.deepEqual(h.state.changes, review);
+    assert.equal(h.state.pendingScope, undefined);
+});
+
+await test('QUICK-EXCLUSION refuses an unrelated pending request without silently applying it', async () => {
+    const h = quickExclusionHarness(); h.state.confirm = true;
+    h.state.workspaceConfiguration.watchExclude.push({ scope: 'all', pattern: '/unrelated/' });
+    await h.exclude();
+    assert.equal(h.state.updates.length, 0);
+    assert.equal(h.state.applies, 0);
+    assert.equal(h.state.dialogs.filter(item => item.options?.modal).length, 0);
 });
 
 console.log(`${count} production review UI cases passed (VS Code, DOM and renderer boundaries mocked).`);
