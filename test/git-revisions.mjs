@@ -49,7 +49,7 @@ function setup(show, options = {}) {
     };
     const settings = { showRevisions: options.enabled ?? false, showAllChanges: options.staged ?? false };
     const renders = [];
-    const decorations = { clearAllDecorations() {}, updateDecorations() {}, renderLineChanges: (_editor, changes) => {
+    const decorations = { clearAllDecorations() { options.onClear?.(); }, updateDecorations() {}, renderLineChanges: (_editor, changes) => {
         renders.push(changes); options.onRender?.();
     } };
     const module = { exports: {} };
@@ -83,6 +83,29 @@ test('Git revisions compare against the index and can be toggled', async () => {
     await h.events.toggle();
     assert.equal(h.decorations.gitRevisionMode, false);
     assert.match(h.status.text, /Off/);
+    h.instance.dispose();
+});
+
+test('keeps decorations visible while refreshing and clears them when disabled', async () => {
+    let resolveRead;
+    let pending = false;
+    let clears = 0;
+    const h = setup(() => pending ? new Promise(resolve => { resolveRead = resolve; }) : Promise.resolve('committed'),
+        { onClear: () => clears++ });
+    await h.events.toggle();
+    assert.equal(h.renders.length, 1);
+    clears = 0;
+    pending = true;
+    const refresh = h.events.editor();
+    assert.equal(clears, 0);
+    assert.equal(h.renders.length, 1);
+    resolveRead('committed');
+    await refresh;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.renders.length, 2);
+    assert.equal(clears, 0);
+    await h.events.toggle();
+    assert.equal(clears, 1);
     h.instance.dispose();
 });
 

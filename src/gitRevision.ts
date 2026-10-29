@@ -72,6 +72,7 @@ export class GitRevision implements vscode.Disposable {
     private request = 0;
     private timer?: ReturnType<typeof setTimeout>;
     private repositoryListener?: vscode.Disposable;
+    private renderedEditor?: vscode.TextEditor;
     private repository?: Repository;
     private api?: GitApi;
     private apiListeners: vscode.Disposable[] = [];
@@ -124,6 +125,7 @@ export class GitRevision implements vscode.Disposable {
             this.repository = undefined;
             this.current = undefined;
             this.decorations.clearAllDecorations();
+            this.renderedEditor = undefined;
         }
     }
 
@@ -141,8 +143,11 @@ export class GitRevision implements vscode.Disposable {
         const request = ++this.request;
         this.current = undefined;
         this.onChange();
-        this.decorations.clearAllDecorations();
         const editor = revisionEditor();
+        if (this.renderedEditor && this.renderedEditor !== editor) {
+            this.decorations.clearAllDecorations();
+            this.renderedEditor = undefined;
+        }
         if (!editor || editor.document.uri.scheme !== 'file') { return; }
         const version = editor.document.version;
         const started = Date.now();
@@ -182,11 +187,14 @@ export class GitRevision implements vscode.Disposable {
             this.status.tooltip = showAll ? 'Showing net changes against HEAD. Click to hide.' :
                 'Showing unstaged changes against the Git index. Click to hide.';
             this.decorations.renderLineChanges(editor, changes);
+            this.renderedEditor = editor;
             this.log.info(`refresh #${request} rendered ${changes.length} changes in ${Date.now() - started}ms`);
             this.onChange();
         } catch (error) {
             this.log.warn(`refresh #${request}: ${error instanceof Error ? error.message : String(error)}`);
             if (this.enabled && request === this.request) {
+                this.decorations.clearAllDecorations();
+                this.renderedEditor = undefined;
                 this.status.tooltip = `Git revisions unavailable: ${error instanceof Error ? error.message : String(error)}`;
             }
             if (notify && this.enabled && request === this.request) {
