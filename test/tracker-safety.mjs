@@ -1206,6 +1206,27 @@ for(const afterApply of [false,error('injected hunk post-mutation failure')]) te
 });
 const stage1Count=tests.length;
 {
+    for (const action of ['keep', 'revert']) test(`INLINE-REVISION ${action} changes only the chosen edit`, async()=>{
+        const p=file();
+        seed(p, 'The quick brown fox jumps over the lazy dog.\n', 'The quick red fox jumps over the sleepy dog.\n');
+        await scan(p);
+        const block=tracker.getChangeBlocks(p)[0];
+        const change=block.changes.find(c=>c.type==='modified');
+        assert.ok(change);
+        const ref={lineNumber:change.lineNumber,originalLineNumber:change.originalLineNumber,index:0};
+        const token=tracker.getReviewToken(p);
+        const result=action==='keep' ? await tracker.keepBlock(p,block.blockId,token,ref) : await tracker.revertBlock(p,block.blockId,token,ref);
+        assert.ok(succeeded(result));
+        if(action==='keep') {
+            assert.equal(tracker.getOriginalContent(p),'The quick red fox jumps over the lazy dog.\n');
+            assert.equal(disk(p),'The quick red fox jumps over the sleepy dog.\n');
+        } else {
+            assert.equal(document(p).getText(),'The quick brown fox jumps over the sleepy dog.\n');
+            assert.equal(tracker.getOriginalContent(p),'The quick brown fox jumps over the lazy dog.\n');
+        }
+        assert.ok(pending(p));
+        assert.equal(succeeded(await tracker.keepBlock(p,block.blockId,token,ref)),false);
+    });
     test('DT-04 pure insertion Keep Y uses its baseline coordinate',async()=>{
         const p=file(); seed(p,'a\nb\nc\nd\ne\n','X\na\nb\nc\nY\nd\ne\n'); await scan(p);
         const working=disk(p); const block=tracker.getChangeBlocks(p).find(b=>b.changes.some(c=>c.newText==='Y'));

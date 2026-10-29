@@ -67,13 +67,13 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 
 ## 使用方式
 
-1. 在 VS Code 左侧 Activity Bar 中打开 **Code Diff Tracker**。
-2. 执行 **Start Recording** 建立基线。新工作区默认保持停止；新范围或范围扩展可能先需要本机确认：
+1. 在 VS Code 左侧 Activity Bar 中打开 **Code Diff Tracker**。**修订**面板提供显示开关、上一处和下一处；录制功能位于 **高级：录制审阅** 中。
+2. 在高级录制审阅中执行 **Start Recording** 建立基线。新工作区默认保持停止；新范围或范围扩展可能先需要本机确认：
    - `Code Diff Tracker: Start Recording`
    - `Code Diff Tracker: Stop Recording`
    - `Code Diff Tracker: Toggle Recording`
 3. 在工作区中编辑文件，或通过外部工具改动文件。
-4. 在 **Change Recording** 面板中点击已变更文件，按默认模式打开 Diff。
+4. 在 **高级：录制审阅** 中点击已变更文件，按默认模式打开 Diff。
 5. 也可以通过右键菜单或编辑器标题栏切换其他查看方式：
    - Inline Diff
    - Side-by-Side Diff
@@ -95,6 +95,16 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 在快照 **current 侧编辑器内右键**，可执行 **Keep Reviewed File**、**Revert Reviewed File**，或对准确选中的一个完整块执行 Keep/Revert。部分选区、含删除行的块、过期快照或目标不明确时会拒绝；块无法安全映射时使用文件级审阅。块级 Revert 沿用未保存缓冲区语义，必要时保存真实文件后重新打开快照。
 
 `diffTracker.nativeQuickDiff` 是独立开关，默认仍为 `false`；选择 Native Review 不会自动启用它。显式启用后可使用 **Code Diff Tracker Review** gutter provider。它的 **Open Native Review Snapshot** 菜单只打开新审阅，不直接应用缺少版本信息的 Quick Diff hunk。非文本和未知资源继续保留在原有 Changes 视图。
+
+### 单独审阅行内修改
+
+编辑器标题栏的上下箭头可跳转到当前文件的上一处或下一处修改，到末尾后循环；录制模式和 Git 修订模式均可使用。
+
+录制模式下，点击或悬停修订文字，可在提示中直接选择 **Accept / Reject**，也可切换上一处或下一处。新增或整行删除的操作以变更块为单位。也可以点击变更块上方的 **Review inline edits…**，选择其中一处修改，再选择 Keep 或 Revert。其他修改保持待审；Revert 仍要求文件没有未保存修改。该操作针对录制基线，不针对 Git HEAD。
+
+### 当前文件的 Git 修订
+
+按 **Shift+Alt+G**（macOS：**Shift+Option+G**），或点击状态栏的 **Git Revisions: On / Off**，切换显示或隐藏相对 Git 暂存区的未暂存修订。也可执行命令 **Code Diff Tracker: Toggle Git Revisions for Current File**。修订包含未暂存和未保存的文本修改，切换编辑器时跟随当前文件。行内修改以及纯新增或删除的变更块可通过 **Accept** 暂存，或通过 **Reject** 在编辑器中撤销；Reject 后需保存文件。删除内容以虚拟文字显示。该模式独立于录制审阅；关闭后恢复录制装饰。需要 VS Code Git 扩展和已有提交；尚未加入暂存区的新文件暂不支持，文件大小限 1 MiB。
 
 ### 实时删除文字（Typst / .typ）
 
@@ -231,7 +241,7 @@ code --install-extension lengmh.code-diff-tracker
 | `diffTracker.showDeletedLinesBadge` | `true` | 是否显示删除行徽标 |
 | `diffTracker.showCodeLens` | `true` | 是否在变更块上方显示 CodeLens 操作 |
 | `diffTracker.highlightAddedLines` | `true` | 是否用绿色背景高亮新增行 |
-| `diffTracker.highlightModifiedLines` | `true` | 是否用蓝色背景高亮修改行 |
+| `diffTracker.highlightModifiedLines` | `false` | 是否用蓝色背景高亮修改行 |
 | `diffTracker.highlightWordChanges` | `true` | 是否高亮修改行中的词级差异 |
 | `diffTracker.defaultOpenMode` | `webview` | 点击变化文件时的打开方式；`nativeReview` 为绑定版本的文本快照，不透明/未知资源回退到 WebView |
 | `diffTracker.nativeQuickDiff` | `false` | 独立启用 Quick Diff provider；其菜单打开新的 Native Review 快照 |

@@ -63,6 +63,46 @@ export interface ModifiedLineGhosts {
     removed: Array<{ column: number; text: string }>;
 }
 
+export interface InlineRevision {
+    oldStart: number;
+    oldEnd: number;
+    newStart: number;
+    newEnd: number;
+    oldText: string;
+    newText: string;
+}
+
+/** Adjacent insertions and deletions form one independently reviewable revision. */
+export function getInlineRevisions(oldText: string, newText: string): InlineRevision[] {
+    if (oldText.length + newText.length > 4096) { return []; }
+    const isCjk = /[\u2e80-\u9fff\uf900-\ufaff]/.test(oldText + newText);
+    const parts = isCjk ? Diff.diffChars(oldText, newText) : Diff.diffWordsWithSpace(oldText, newText);
+    const revisions: InlineRevision[] = [];
+    let oldOffset = 0;
+    let newOffset = 0;
+    let revision: InlineRevision | undefined;
+    for (const part of parts) {
+        if (!part.added && !part.removed) {
+            revision = undefined;
+            oldOffset += part.value.length;
+            newOffset += part.value.length;
+            continue;
+        }
+        if (!revision) {
+            revision = { oldStart: oldOffset, oldEnd: oldOffset, newStart: newOffset, newEnd: newOffset, oldText: '', newText: '' };
+            revisions.push(revision);
+        }
+        if (part.removed) {
+            revision.oldText += part.value;
+            revision.oldEnd = oldOffset += part.value.length;
+        } else {
+            revision.newText += part.value;
+            revision.newEnd = newOffset += part.value.length;
+        }
+    }
+    return revisions;
+}
+
 /** Current document columns use UTF-16 offsets, as required by VS Code. */
 export function diffModifiedLine(oldText: string, newText: string): ModifiedLineGhosts {
     if (oldText === newText) { return { added: [], removed: [] }; }

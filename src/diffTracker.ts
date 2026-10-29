@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { displayFileName } from './utils/displayPath';
+import { getInlineRevisions } from './utils/liveDeletedText';
 import * as Diff from 'diff';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -359,6 +360,12 @@ export interface MixedBatchActionResult extends BatchActionResult {
     failures: number;
     conflicts: number;
     cancelled: number;
+}
+
+export interface InlineRevisionRef {
+    lineNumber: number;
+    originalLineNumber: number;
+    index: number;
 }
 
 export interface ReviewToken {
@@ -12033,13 +12040,13 @@ export class DiffTracker {
     /**
      * Revert a specific change block to its original content
      */
-    public revertBlock(filePath: string, blockRef: string | number, token = this.getReviewToken(filePath)): Promise<ActionResult> {
+    public revertBlock(filePath: string, blockRef: string | number, token = this.getReviewToken(filePath), inline?: InlineRevisionRef): Promise<ActionResult> {
         filePath = this.canonicalTrackingPath(filePath);
         return this.queueRecoveryAction(() =>
-            this.queueFileAction(filePath, token, review => this.revertBlockReviewed(filePath, blockRef, review)));
+            this.queueFileAction(filePath, token, review => this.revertBlockReviewed(filePath, blockRef, review, inline)));
     }
 
-    private async revertBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken): Promise<ActionResult> {
+    private async revertBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken, inline?: InlineRevisionRef): Promise<ActionResult> {
         const targetError = this.validateRevertTarget(filePath);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
         const originalContent = this.fileSnapshots.get(filePath);
@@ -12074,7 +12081,15 @@ export class DiffTracker {
             const startIdx = Math.max(0, block.startLine - 1);
             const deleteCount = Math.max(0, block.endLine - block.startLine + 1);
 
-            if (block.type === 'added') {
+            if (inline) {
+                const oldLine = originalModel.lines[inline.originalLineNumber - 1];
+                const newLine = currentModel.lines[inline.lineNumber - 1];
+                const change = block.changes.find(c => c.type === 'modified' && c.lineNumber === inline.lineNumber && c.originalLineNumber === inline.originalLineNumber);
+                const revision = oldLine !== undefined && newLine !== undefined && change?.oldText === oldLine && change.newText === newLine
+                    ? getInlineRevisions(oldLine, newLine)[inline.index] : undefined;
+                if (!revision) { return this.actionResult(filePath, 'conflict', 'Inline revision changed; review again'); }
+                nextLines[inline.lineNumber - 1] = newLine.slice(0, revision.newStart) + revision.oldText + newLine.slice(revision.newEnd);
+            } else if (block.type === 'added') {
                 nextLines.splice(startIdx, deleteCount);
             } else if (block.type === 'modified') {
                 const originalBlockLines = this.getOrderedOriginalLines(block);
@@ -12084,7 +12099,7 @@ export class DiffTracker {
                 nextLines.splice(startIdx, 0, ...deletedLines);
             }
 
-            const nextHasFinalEol = this.blockTouchesEof(block, currentModel.lines.length, originalModel.lines.length)
+            const nextHasFinalEol = !inline && this.blockTouchesEof(block, currentModel.lines.length, originalModel.lines.length)
                 ? originalModel.hasFinalEol
                 : currentModel.hasFinalEol;
             const nextText = this.serializeTextModel(
@@ -12194,12 +12209,12 @@ export class DiffTracker {
      * Keep a specific change block (accept the changes)
      * Updates the snapshot so this block's changes become the new baseline
      */
-    public keepBlock(filePath: string, blockRef: string | number, token = this.getReviewToken(filePath)): Promise<ActionResult> {
+    public keepBlock(filePath: string, blockRef: string | number, token = this.getReviewToken(filePath), inline?: InlineRevisionRef): Promise<ActionResult> {
         filePath = this.canonicalTrackingPath(filePath);
         const context = this.captureKeepGitContext(filePath);
         const signature = token?.keepGitContextSignature ?? context.signature;
         return this.queueRecoveryAction(() => this.queueFileAction(filePath, token,
-            review => this.keepBlockReviewed(filePath, blockRef, review, signature)));
+            review => this.keepBlockReviewed(filePath, blockRef, review, signature, inline)));
     }
 
     private beginKeepTransaction(filePath: string, review: ReviewToken, signature: string): BaselineTransaction {
@@ -12365,7 +12380,7 @@ export class DiffTracker {
         }
     }
 
-    private async keepBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken, signature: string): Promise<ActionResult> {
+    private async keepBlockReviewed(filePath: string, blockRef: string | number, review: ReviewToken, signature: string, inline?: InlineRevisionRef): Promise<ActionResult> {
         const targetError = this.validateKeepTarget(filePath, signature);
         if (targetError) { return this.actionResult(filePath, 'conflict', targetError); }
         if (!this.keepReviewStillCurrent(review, signature)) { return this.actionResult(filePath, 'conflict', 'Keep refused because review, disk, or Git context became stale'); }
@@ -12402,7 +12417,15 @@ export class DiffTracker {
             .map(c => c.originalLineNumber)
             .filter((n): n is number => n !== undefined);
 
-        if (block.type === 'deleted') {
+        if (inline) {
+            const oldLine = originalLines[inline.originalLineNumber - 1];
+            const newLine = currentLines[inline.lineNumber - 1];
+            const change = block.changes.find(c => c.type === 'modified' && c.lineNumber === inline.lineNumber && c.originalLineNumber === inline.originalLineNumber);
+            const revision = oldLine !== undefined && newLine !== undefined && change?.oldText === oldLine && change.newText === newLine
+                ? getInlineRevisions(oldLine, newLine)[inline.index] : undefined;
+            if (!revision) { return this.actionResult(filePath, 'conflict', 'Inline revision changed; review again'); }
+            originalLines[inline.originalLineNumber - 1] = oldLine.slice(0, revision.oldStart) + revision.newText + oldLine.slice(revision.oldEnd);
+        } else if (block.type === 'deleted') {
             // Deleted block: remove lines from original (they don't exist in current)
             // Sort descending to avoid index shifting issues
             const sortedDesc = [...new Set(originalLineNumbers)].sort((a, b) => b - a);
@@ -12442,7 +12465,7 @@ export class DiffTracker {
         }
 
         // Update snapshot using current editor newline style while keeping logical accepted content.
-        const keepHasFinalEol = this.blockTouchesEof(block, currentModel.lines.length, originalModel.lines.length)
+        const keepHasFinalEol = !inline && this.blockTouchesEof(block, currentModel.lines.length, originalModel.lines.length)
             ? currentModel.hasFinalEol
             : originalModel.hasFinalEol;
         const newSnapshot = this.serializeTextModel(
@@ -13087,7 +13110,7 @@ export class DiffTracker {
         return this.buildDiffViewFromContents(originalContent, currentContent);
     }
 
-    private buildDiffViewFromContents(
+    public buildDiffViewFromContents(
         originalContent: string,
         currentContent: string
     ): { lineChanges: LineChange[]; inlineView: InlineDiffView } {

@@ -1383,7 +1383,7 @@ await test('mid-action authoritative update keeps DOM busy until completion upda
     ui.receive({...h.messages[0],mutationBusy:false});assert.equal(ui.elements.get('btn-keep-all').disabled,false);
 });
 await test('CodeLens and tree carry captured review tokens for block/file/batch actions',async()=>{
-    const h=harness();h.tracker.getChangeBlocks=()=>[{blockId:'block',startLine:1,endLine:1}];
+    const h=harness();h.tracker.getChangeBlocks=()=>[{blockId:'block',startLine:1,endLine:1,changes:[]}];
     const provider=new (h.load('codeLensProvider.ts').DiffCodeLensProvider)(h.tracker);
     const lenses=provider.provideCodeLenses({uri:{scheme:'file',fsPath:filePath},version:1},{});
     for(const lens of lenses.filter(v=>/keep|revert/i.test(v.command.command))) assert.equal(lens.command.arguments.at(-1),reviewToken);
@@ -1392,6 +1392,20 @@ await test('CodeLens and tree carry captured review tokens for block/file/batch 
     for(const item of items.filter(i=>/^(diffTracker.keepAllChanges|diffTracker.revertAllChanges)$/.test(i.command?.command))) {
         assert.equal(item.command.arguments,undefined,'mixed root actions capture text/opaque/unknown state at invocation');
     }
+});
+await test('CodeLens counts and navigates inline changes within a block',()=>{
+    const h=harness();
+    const oldText='The quick brown fox jumps over the lazy dog.';
+    const newText='The quick red fox jumps over the sleepy dog.';
+    h.tracker.getChangeBlocks=()=>[{blockId:'block',startLine:1,endLine:1,changes:[{type:'modified',lineNumber:1,oldText,newText}]}];
+    const uri={scheme:'file',fsPath:filePath,toString:()=>filePath};
+    const document={uri,version:1,lineCount:1,lineAt:()=>({text:newText})};
+    h.vscode.window.activeTextEditor={document,selection:{start:{line:0,character:newText.indexOf('sleepy')}}};
+    const provider=new (h.load('codeLensProvider.ts').DiffCodeLensProvider)(h.tracker);
+    const lenses=provider.provideCodeLenses(document,{});
+    assert.ok(lenses.some(lens=>lens.command.title==='2 of 2 inline'));
+    const arrows=lenses.filter(lens=>lens.command.command==='diffTracker.goToInlineRevision');
+    assert.deepEqual(Array.from(arrows, lens=>lens.command.arguments[2]),[0,0]);
 });
 await test('detached old annotation button sends its captured old review token',()=>{
     const h=harness({filePath,fileName:'empty.m',originalContent:'before',currentContent:'after'});

@@ -253,7 +253,7 @@ code --install-extension lengmh.code-diff-tracker
 | `diffTracker.showDeletedLinesBadge` | `true` | Show a badge indicating deleted lines |
 | `diffTracker.showCodeLens` | `true` | Show CodeLens actions (Revert/Keep) above change blocks |
 | `diffTracker.highlightAddedLines` | `true` | Highlight added lines with green background |
-| `diffTracker.highlightModifiedLines` | `true` | Highlight modified lines with blue background |
+| `diffTracker.highlightModifiedLines` | `false` | Highlight modified lines with blue background |
 | `diffTracker.highlightWordChanges` | `true` | Highlight word-level changes within modified lines |
 | `diffTracker.defaultOpenMode` | `webview` | Changed-file opening mode; select `nativeReview` for version-bound text snapshots with WebView fallback for opaque/unknown resources |
 | `diffTracker.nativeQuickDiff` | `false` | Separate opt-in Quick Diff provider whose menu opens a fresh Native Review snapshot |

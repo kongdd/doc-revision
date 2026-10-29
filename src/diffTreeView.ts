@@ -14,7 +14,8 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<TreeItem>, 
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-    constructor(private diffTracker: DiffTracker) { }
+    constructor(private diffTracker: DiffTracker, private isGitRevisionMode: () => boolean = () => false,
+        private simplified = false) { }
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -27,8 +28,37 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<TreeItem>, 
     getChildren(element?: TreeItem): Thenable<TreeItem[]> {
         const items: TreeItem[] = [];
 
-        // Root level - show files
-        if (!element) {
+        if (!element && this.simplified) {
+            const toggle = new TreeItem('显示修订', vscode.TreeItemCollapsibleState.None);
+            toggle.description = this.isGitRevisionMode() ? '已开启' : '已关闭';
+            toggle.iconPath = new vscode.ThemeIcon(this.isGitRevisionMode() ? 'eye' : 'eye-closed');
+            toggle.tooltip = '显示或隐藏当前文件相对 Git 暂存区的修改';
+            toggle.command = { command: 'diffTracker.toggleGitRevisions', title: '显示修订' };
+            const previous = new TreeItem('上一处', vscode.TreeItemCollapsibleState.None);
+            previous.iconPath = new vscode.ThemeIcon('arrow-up');
+            previous.command = { command: 'diffTracker.gitPreviousChange', title: '上一处' };
+            const next = new TreeItem('下一处', vscode.TreeItemCollapsibleState.None);
+            next.iconPath = new vscode.ThemeIcon('arrow-down');
+            next.command = { command: 'diffTracker.gitNextChange', title: '下一处' };
+            const highlightEnabled = vscode.workspace.getConfiguration('diffTracker').get<boolean>('highlightModifiedLines', false);
+            const highlight = new TreeItem('修改行背景色', vscode.TreeItemCollapsibleState.None);
+            highlight.description = highlightEnabled ? '已开启' : '已关闭';
+            highlight.iconPath = new vscode.ThemeIcon(highlightEnabled ? 'check' : 'circle-large-outline');
+            highlight.tooltip = '切换修改行的背景色，不影响文字修订标记。';
+            highlight.command = { command: 'diffTracker.toggleSetting', title: '修改行背景色', arguments: ['highlightModifiedLines'] };
+            const advanced = new TreeItem('高级：录制审阅', vscode.TreeItemCollapsibleState.Collapsed);
+            advanced.contextValue = 'advancedRecording';
+            const gaps = this.diffTracker.getSubtreeCoverageGaps().length;
+            const pending = this.diffTracker.getTrackedChanges().length;
+            advanced.iconPath = new vscode.ThemeIcon(gaps ? 'warning' : 'settings-gear');
+            advanced.description = [this.diffTracker.getIsRecording() ? '录制中' : '', pending ? `${pending} 项待审` : '',
+                gaps ? '监听需检查' : ''].filter(Boolean).join(' · ');
+            advanced.tooltip = '展开录制、待审文件和监听诊断；这些内容与 Git 修订独立。';
+            return Promise.resolve([toggle, previous, next, highlight, advanced]);
+        }
+
+        // Recording review remains available under Advanced.
+        if (!element || element.contextValue === 'advancedRecording') {
             const changes = this.diffTracker.getTrackedChanges();
             const reviewTokens = this.diffTracker.getReviewTokens();
             const opaqueReviewTokens = this.diffTracker.getOpaqueReviewTokens();

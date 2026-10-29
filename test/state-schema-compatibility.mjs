@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createLegacyEffectiveScope, validateAndCanonicalizeScope } from '../out/monitoringScope.js';
+import { detectLocalPathCaseSensitivity } from '../out/utils/pathIdentity.js';
 
 export function registerStateSchemaCompatibility(harness) {
     const { test, root, Uri, DiffTracker, faults, file, pending,
@@ -431,8 +432,8 @@ export function registerStateSchemaCompatibility(harness) {
     }
 
     test('SCHEMA-V4 parses saved configured scope without consulting mutable filesystem paths', async () => {
-        if (process.platform === 'win32') {
-            console.log('SKIP SCHEMA-V4 mutable-path parser fixture requires a case-sensitive host');
+        if (detectLocalPathCaseSensitivity(root) !== true) {
+            console.log('SKIP SCHEMA-V4 mutable-path parser fixture requires a case-sensitive filesystem');
             return;
         }
         const scopeParent = file('persisted-scope-case');

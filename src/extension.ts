@@ -2,10 +2,13 @@ import * as fs from 'fs';
 import { withReviewNavigation } from './reviewNavigation';
 import { displayFileName } from './utils/displayPath';
 import * as vscode from 'vscode';
-import { ActionResult, BatchActionResult, DiffTracker, LargeFileReminderToken, MixedBatchActionResult, OpaqueReviewToken, ReviewToken, UnknownReviewToken, TrackChangesEvent } from './diffTracker';
+import { ActionResult, BatchActionResult, DiffTracker, InlineRevisionRef, LargeFileReminderToken, MixedBatchActionResult, OpaqueReviewToken, ReviewToken, UnknownReviewToken, TrackChangesEvent } from './diffTracker';
 import { DecorationManager } from './decorationManager';
+import { GitInlineRevision, GitRevision } from './gitRevision';
+import { getInlineLocations, navigateAndShowChange } from './changeNavigation';
 import { DiffTreeDataProvider } from './diffTreeView';
 import { DiffHoverProvider } from './hoverProvider';
+import { GitRevisionHoverProvider, RevisionHoverProvider } from './revisionHover';
 import { StatusBarManager } from './statusBarManager';
 import { OriginalContentProvider } from './originalContentProvider';
 import { InlineContentProvider } from './inlineContentProvider';
@@ -14,6 +17,7 @@ import { SettingsTreeDataProvider } from './settingsTreeView';
 import { WebviewDiffPanel } from './webviewDiffPanel';
 import { WatchExcludePanel } from './watchExcludePanel';
 import { createInlineDiffUri } from './utils/inlineDiffUri';
+import { getInlineRevisions, shortenDeletedText } from './utils/liveDeletedText';
 import { GitContextEvent, GitContextMonitor, GitContextSnapshot } from './gitContext';
 import { MonitoringScopeController } from './monitoringScopeController';
 import { NativeReviewAdapter } from './nativeReviewAdapter';
@@ -97,7 +101,53 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBarManager = new StatusBarManager(diffTracker);
     originalContentProvider = new OriginalContentProvider(diffTracker);
     inlineContentProvider = new InlineContentProvider(diffTracker);
-    codeLensProvider = new DiffCodeLensProvider(diffTracker);
+    codeLensProvider = new DiffCodeLensProvider(diffTracker, () => decorationManager.gitRevisionMode);
+    context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(() => codeLensProvider.refresh()));
+    const gitRevision = new GitRevision(diffTracker, decorationManager, () => {
+        codeLensProvider.refresh();
+        diffTreeDataProvider?.refresh();
+    });
+    const revisionHover = new RevisionHoverProvider(diffTracker, () => decorationManager.gitRevisionMode);
+    const gitRevisionHover = new GitRevisionHoverProvider(gitRevision);
+    for (const action of ['accept', 'reject'] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${action}GitRevision`, async (revision: GitInlineRevision) => {
+            if (!revision) { return; }
+            try {
+                await gitRevision.applyInlineRevision(revision, action);
+            } catch (error) {
+                void vscode.window.showWarningMessage(`Git revision: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }));
+    }
+    context.subscriptions.push(gitRevision, vscode.languages.registerHoverProvider({ scheme: 'file' }, revisionHover),
+        vscode.languages.registerHoverProvider({ scheme: 'file' }, gitRevisionHover));
+    context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
+        if (event.kind !== vscode.TextEditorSelectionChangeKind.Mouse || event.textEditor !== vscode.window.activeTextEditor ||
+            !event.textEditor.selection.isEmpty) { return; }
+        const { document, selection } = event.textEditor;
+        if (revisionHover.find(document, selection.active) || gitRevisionHover.find(document, selection.active)) {
+            void vscode.commands.executeCommand('editor.action.showHover');
+        }
+    }));
+    for (const [command, direction] of [['previous', -1], ['next', 1]] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.git${command === 'previous' ? 'Previous' : 'Next'}Change`, () => {
+            if (!decorationManager.gitRevisionMode) {
+                void vscode.window.showInformationMessage('请先开启修订模式。');
+                return;
+            }
+            return vscode.commands.executeCommand(`diffTracker.${command}Change`);
+        }));
+        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${command}Change`, async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.uri.scheme !== 'file') { return; }
+            const getChanges = () => decorationManager.gitRevisionMode
+                ? gitRevision.getChanges(editor.document)
+                : diffTracker.getIsRecording() ? diffTracker.getLineChanges(editor.document.uri.fsPath) ?? [] : [];
+            if (!await navigateAndShowChange(editor, getChanges, direction) && vscode.window.activeTextEditor === editor) {
+                void vscode.window.showInformationMessage('No changes available in the current file.');
+            }
+        }));
+    }
     settingsTreeDataProvider = new SettingsTreeDataProvider();
     // A fresh workspace with no legacy Global rules can safely adopt the default
     // Rules scope before recording starts. Restored V1/V2/V3 sessions remain in
@@ -107,7 +157,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     // Register tree view provider for activity bar
-    diffTreeDataProvider = new DiffTreeDataProvider(diffTracker);
+    diffTreeDataProvider = new DiffTreeDataProvider(diffTracker, () => decorationManager.gitRevisionMode, true);
     changesTreeView = vscode.window.createTreeView('diffTracker.changesView', {
         treeDataProvider: diffTreeDataProvider,
         showCollapseAll: false
@@ -1077,6 +1127,18 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    for (const action of ['accept', 'reject'] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${action}Revision`, async (
+            filePath: string, blockId: string, token?: ReviewToken, inline?: InlineRevisionRef
+        ) => {
+            if (!token || decorationManager.gitRevisionMode || !diffTracker.getIsRecording()) { return missingReview(filePath); }
+            const result = action === 'accept'
+                ? await diffTracker.keepBlock(filePath, blockId, token, inline)
+                : await diffTracker.revertBlock(filePath, blockId, token, inline);
+            return reportAction(result);
+        }));
+    }
+
     // Block-wise revert command
     context.subscriptions.push(
         vscode.commands.registerCommand('diffTracker.revertBlock', async (filePath: string, blockRef: string | number, token?: ReviewToken) => {
@@ -1121,6 +1183,44 @@ export async function activate(context: vscode.ExtensionContext) {
             const position = new vscode.Position(line, 0);
             editor.selection = new vscode.Selection(position, position);
             editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffTracker.goToInlineRevision', async (filePath: string, blockId: string, index: number) => {
+            const block = diffTracker.getChangeBlocks(filePath).find(item => item.blockId === blockId);
+            if (!block) { return; }
+            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+            const location = getInlineLocations(block.changes, document)[index];
+            if (!location) { return; }
+            const editor = await vscode.window.showTextDocument(document);
+            const start = new vscode.Position(location.line, location.start);
+            const end = new vscode.Position(location.line, location.end);
+            editor.selection = new vscode.Selection(start, end);
+            editor.revealRange(new vscode.Range(start, end), vscode.TextEditorRevealType.InCenter);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffTracker.reviewInlineRevision', async (filePath: string, blockId: string, token?: ReviewToken) => {
+            if (!token) { return missingReview(filePath); }
+            const block = diffTracker.getChangeBlocks(filePath).find(item => item.blockId === blockId);
+            if (!block) { return missingReview(filePath); }
+            const items = block.changes.flatMap(change => {
+                if (change.type !== 'modified' || change.oldText === undefined || change.newText === undefined || change.originalLineNumber === undefined) { return []; }
+                return getInlineRevisions(change.oldText, change.newText).map((revision, index) => ({
+                    label: `Line ${change.lineNumber}: ${shortenDeletedText(revision.oldText || '∅', 60)} → ${shortenDeletedText(revision.newText || '∅', 60)}`,
+                    ref: { lineNumber: change.lineNumber, originalLineNumber: change.originalLineNumber!, index }
+                }));
+            });
+            const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select an inline revision' });
+            if (!selected) { return; }
+            const action = await vscode.window.showQuickPick(['Keep', 'Revert'], { placeHolder: 'Choose an action for this revision' });
+            if (!action) { return; }
+            const result = action === 'Keep'
+                ? await diffTracker.keepBlock(filePath, blockId, token, selected.ref)
+                : await diffTracker.revertBlock(filePath, blockId, token, selected.ref);
+            return reportAction(result);
         })
     );
 
@@ -1394,6 +1494,7 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration('diffTracker.highlightModifiedLines')) { diffTreeDataProvider.refresh(); }
         if (event.affectsConfiguration('diffTracker.showDeletedTextInline') ||
             event.affectsConfiguration('diffTracker.showDeletedLinesBadge') ||
             event.affectsConfiguration('diffTracker.highlightWordChanges') ||

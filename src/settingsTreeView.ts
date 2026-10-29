@@ -84,7 +84,7 @@ export class SettingsTreeDataProvider implements vscode.TreeDataProvider<Setting
             label: 'Highlight',
             items: [
                 { key: 'highlightAddedLines', label: 'Added lines' },
-                { key: 'highlightModifiedLines', label: 'Modified lines' },
+                { key: 'highlightModifiedLines', label: 'Modified lines', defaultValue: false },
                 { key: 'highlightWordChanges', label: 'Word changes' }
             ]
         },
@@ -200,8 +200,9 @@ export class SettingsTreeDataProvider implements vscode.TreeDataProvider<Setting
         const config = vscode.workspace.getConfiguration('diffTracker');
         const setting = this.settings.flatMap(group => group.items).find(item => item.key === settingKey);
         const currentValue = config.get<boolean>(settingKey, setting?.defaultValue ?? true);
-        const isWebviewDefault = settingKey === 'webviewWordWrap' || settingKey === 'webviewExpandUnchanged';
-        const target = isWebviewDefault && config.inspect(settingKey)?.workspaceValue !== undefined
+        const respectsWorkspaceOverride = settingKey === 'webviewWordWrap' || settingKey === 'webviewExpandUnchanged' ||
+            settingKey === 'highlightModifiedLines';
+        const target = respectsWorkspaceOverride && config.inspect(settingKey)?.workspaceValue !== undefined
             ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
         await config.update(settingKey, !currentValue, target);
         this.refresh();

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DiffTracker, TrackChangesEvent } from './diffTracker';
+import { getInlineLocations } from './changeNavigation';
 
 /**
  * Provides CodeLens actions for change blocks
@@ -15,7 +16,7 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     private readonly prewarmDelayMs = 20;
     private readonly trackingSubscription: vscode.Disposable;
 
-    constructor(private diffTracker: DiffTracker) {
+    constructor(private diffTracker: DiffTracker, private isGitRevisionMode: () => boolean = () => false) {
         // Refresh CodeLens when diff changes
         this.trackingSubscription = this.diffTracker.onDidTrackChanges((event: TrackChangesEvent) => {
             if (this.disposed) { return; }
@@ -50,7 +51,7 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
         document: vscode.TextDocument,
         _token: vscode.CancellationToken
     ): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
-        if (this.disposed || !this.diffTracker.getIsRecording()) {
+        if (this.disposed || this.isGitRevisionMode() || !this.diffTracker.getIsRecording()) {
             return [];
         }
 
@@ -125,6 +126,33 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
                 arguments: [filePath, block.blockId, reviewToken],
                 tooltip: 'Accept this change and remove from diff'
             }));
+
+            const inlineLocations = getInlineLocations(block.changes, document);
+            const inlineCount = inlineLocations.length;
+            if (inlineCount > 0 && reviewToken) {
+                codeLenses.push(new vscode.CodeLens(range, {
+                    title: `Review ${inlineCount} inline edit${inlineCount === 1 ? '' : 's'}…`,
+                    command: 'diffTracker.reviewInlineRevision',
+                    arguments: [filePath, block.blockId, reviewToken],
+                    tooltip: 'Keep or revert one change within a line'
+                }));
+            }
+
+            if (inlineCount > 1) {
+                const editor = vscode.window.activeTextEditor;
+                const cursor = editor?.document.uri.toString() === document.uri.toString() ? editor.selection.start : undefined;
+                const selected = cursor ? inlineLocations.findIndex(item => item.line === cursor.line && item.start === cursor.character) : -1;
+                const current = Math.max(0, selected);
+                for (const [title, target] of [['↑', (current + inlineCount - 1) % inlineCount],
+                    [`${current + 1} of ${inlineCount} inline`, -1], ['↓', (current + 1) % inlineCount]] as const) {
+                    codeLenses.push(new vscode.CodeLens(range, {
+                        title,
+                        command: target < 0 ? '' : 'diffTracker.goToInlineRevision',
+                        arguments: target < 0 ? [] : [filePath, block.blockId, target],
+                        tooltip: target < 0 ? 'Inline change position' : 'Go to inline change'
+                    }));
+                }
+            }
 
             // Block counter and navigation
             const totalBlocks = blocks.length;

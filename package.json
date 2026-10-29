@@ -2,7 +2,7 @@
   "name": "code-diff-tracker",
   "displayName": "Code Diff Tracker",
   "description": "Review, keep, and safely revert workspace file changes in real time",
-  "version": "0.8.10",
+  "version": "0.8.11",
   "publisher": "lengmh",
   "author": "TinyTigerPan (Fork from Wizyoung)",
   "license": "MIT",
@@ -61,11 +61,12 @@
       "diffTracker": [
         {
           "id": "diffTracker.changesView",
-          "name": "Change Recording"
+          "name": "修订"
         },
         {
           "id": "diffTracker.settingsView",
-          "name": "Settings"
+          "name": "高级设置",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -94,7 +95,7 @@
         },
         "diffTracker.highlightModifiedLines": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Highlight modified lines with blue background"
         },
         "diffTracker.highlightWordChanges": {
@@ -278,6 +279,23 @@
       }
     },
     "commands": [
+      {
+        "command": "diffTracker.previousChange",
+        "title": "Previous Change",
+        "category": "Code Diff Tracker",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "diffTracker.nextChange",
+        "title": "Next Change",
+        "category": "Code Diff Tracker",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "diffTracker.toggleGitRevisions",
+        "title": "Toggle Git Revisions for Current File",
+        "category": "Code Diff Tracker"
+      },
       {
         "command": "diffTracker.toggleRecording",
         "title": "Toggle Recording",
@@ -699,27 +717,27 @@
         {
           "command": "diffTracker.startRecording",
           "when": "view == diffTracker.changesView && !diffTracker.isRecording",
-          "group": "navigation"
+          "group": "advanced@1"
         },
         {
           "command": "diffTracker.stopRecording",
           "when": "view == diffTracker.changesView && diffTracker.isRecording",
-          "group": "navigation"
+          "group": "advanced@1"
         },
         {
           "command": "diffTracker.clearDiffs",
           "when": "view == diffTracker.changesView",
-          "group": "navigation"
+          "group": "advanced@2"
         },
         {
           "command": "diffTracker.undoLastRevert",
           "when": "view == diffTracker.changesView",
-          "group": "navigation"
+          "group": "advanced@3"
         },
         {
           "command": "diffTracker.rebuildGitBaseline",
           "when": "view == diffTracker.changesView",
-          "group": "navigation"
+          "group": "advanced@4"
         },
         {
           "command": "diffTracker.nativeReview.openChanges",
@@ -728,6 +746,16 @@
         }
       ],
       "editor/title": [
+        {
+          "command": "diffTracker.previousChange",
+          "when": "resourceScheme == file && (diffTracker.isRecording || diffTracker.gitRevisions)",
+          "group": "navigation@1"
+        },
+        {
+          "command": "diffTracker.nextChange",
+          "when": "resourceScheme == file && (diffTracker.isRecording || diffTracker.gitRevisions)",
+          "group": "navigation@2"
+        },
         {
           "command": "diffTracker.showSideBySideDiffActive",
           "when": "resourceScheme == file && diffTracker.isRecording",
@@ -798,6 +826,12 @@
     },
     "keybindings": [
       {
+        "command": "diffTracker.toggleGitRevisions",
+        "key": "shift+alt+g",
+        "mac": "shift+option+g",
+        "when": "editorTextFocus && resourceScheme == file"
+      },
+      {
         "command": "diffTracker.toggleRecording",
         "key": "shift+alt+d",
         "mac": "shift+option+d"
@@ -825,8 +859,13 @@
     "test:monitoring-scope": "node test/monitoring-scope.mjs",
     "test:stage2-probes": "node test/known-p0.mjs",
     "test:legacy-manual-policy": "node test/legacy-manual-policy.mjs",
-    "test": "npm run test:live-deleted-text && npm run test:webview-anchors && npm run test:similarity-pairing && npm run test:paths && npm run test:monitoring-scope && npm run test:tracker-safety && npm run test:review-ui && npm run test:git-context && npm run test:git-repositories && npm run test:host-fixture",
-    "test:live-deleted-text": "node test/live-deleted-text.mjs"
+    "test": "npm run test:simple-sidebar && npm run test:revision-hover && npm run test:change-navigation && npm run test:git-revisions && npm run test:inline-revisions && npm run test:live-deleted-text && npm run test:webview-anchors && npm run test:similarity-pairing && npm run test:paths && npm run test:monitoring-scope && npm run test:tracker-safety && npm run test:review-ui && npm run test:git-context && npm run test:git-repositories && npm run test:host-fixture",
+    "test:live-deleted-text": "node test/live-deleted-text.mjs",
+    "test:git-revisions": "node --test test/git-revisions.mjs",
+    "test:inline-revisions": "node --test test/inline-revisions.mjs",
+    "test:change-navigation": "node --test test/change-navigation.mjs",
+    "test:revision-hover": "node --test test/revision-hover.mjs",
+    "test:simple-sidebar": "node --test test/simple-sidebar.mjs"
   },
   "devDependencies": {
     "@pierre/diffs": "1.0.10",

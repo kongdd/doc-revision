@@ -5,6 +5,7 @@ import { toTrackedFilePath } from './utils/inlineDiffUri';
 import { collectDeletedLineGhosts, diffModifiedLine, shortenDeletedText } from './utils/liveDeletedText';
 
 export class DecorationManager {
+    public gitRevisionMode = false;
     private addedDecorationType: vscode.TextEditorDecorationType;
     private deletedDecorationType: vscode.TextEditorDecorationType;
     private modifiedDecorationType: vscode.TextEditorDecorationType;
@@ -92,6 +93,7 @@ export class DecorationManager {
     }
 
     public updateDecorations(editor: vscode.TextEditor) {
+        if (this.gitRevisionMode) { return; }
         // Multi Diff has no stable 1.80 tab-input type to inspect. Snapshot
         // identity itself excludes live decorations, including stale views.
         if (editor.document.uri.scheme === 'diff-tracker-review-base' || editor.document.uri.scheme === 'diff-tracker-review-current') {
@@ -121,12 +123,16 @@ export class DecorationManager {
             return;
         }
 
+        this.renderLineChanges(editor, lineChanges);
+    }
+
+    public renderLineChanges(editor: vscode.TextEditor, lineChanges: NonNullable<ReturnType<DiffTracker['getLineChanges']>>) {
         // Read settings
         const config = vscode.workspace.getConfiguration('diffTracker');
         const showDeletedBadge = config.get<boolean>('showDeletedLinesBadge', true);
         const showDeletedTextInline = config.get<boolean>('showDeletedTextInline', true);
         const highlightAdded = config.get<boolean>('highlightAddedLines', true);
-        const highlightModified = config.get<boolean>('highlightModifiedLines', true);
+        const highlightModified = config.get<boolean>('highlightModifiedLines', false);
         const highlightWordChanges = config.get<boolean>('highlightWordChanges', true);
 
         const addedRanges: vscode.Range[] = [];
@@ -142,7 +148,7 @@ export class DecorationManager {
             const position = atStart ? anchorLine.range.start : anchorLine.range.end;
             const range = new vscode.Range(position, position);
             if (showDeletedTextInline) {
-                const contentText = atStart ? `⟦${group.text}⟧ ` : ` ⟦${group.text}⟧`;
+                const contentText = atStart ? `${group.text} ` : ` ${group.text}`;
                 deletedTextRanges.push({
                     range,
                     renderOptions: atStart
@@ -192,7 +198,7 @@ export class DecorationManager {
                                 deletedTextRanges.push({
                                     range: new vscode.Range(position, position),
                                     renderOptions: {
-                                        after: { contentText: `⟦${shortenDeletedText(part.text, 160)}⟧` }
+                                        after: { contentText: shortenDeletedText(part.text, 160) }
                                     }
                                 });
                             }

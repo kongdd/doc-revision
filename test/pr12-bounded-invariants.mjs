@@ -1111,7 +1111,12 @@ export function registerPR12BoundedInvariants(h) {
     test('PR12 CASE Unicode lowercasing is not watcher exclusion coverage proof',()=>fixture(async({tracker,dir})=>{
         const identity=caseIdentity(tracker,false);
         const upper='\u0130',lower='i\u0307';
-        fs.mkdirSync(path.join(dir,upper));fs.mkdirSync(path.join(dir,lower));
+        fs.mkdirSync(path.join(dir,upper));
+        if (fs.existsSync(path.join(dir,lower))) {
+            console.log('SKIP PR12 Unicode fixture requires distinct filesystem names');
+            return;
+        }
+        fs.mkdirSync(path.join(dir,lower));
         fs.writeFileSync(path.join(dir,upper,'live.txt'),'must remain observed');
         const requested=scopeFor(tracker,'wholeWorkspace',[{scope:'all',pattern:`**/${lower}/**`}]);
         assert.equal(upper.toLowerCase(),lower,'fixture demonstrates the unsafe JavaScript equivalence');

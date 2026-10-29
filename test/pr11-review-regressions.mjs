@@ -1124,7 +1124,7 @@ export function registerPR11ReviewRegressions(h) {
         let t=h.getTracker();
         if(t.currentWorkspaceRootIdentities()[0].caseSensitive!==false) {console.log('SKIP PR11 Windows case-insensitive filesystem scenario on a case-sensitive root');return;}
         const dir=file('CaseDir');fs.mkdirSync(dir);const actual=path.join(dir,'MixedName.txt');fs.writeFileSync(actual,'baseline');
-        const alias=path.join(dir.toUpperCase(),'mixedname.TXT');const storage=file('case-storage');t.storageUri=Uri.file(storage);
+        const alias=path.join(root,path.basename(dir).toUpperCase(),'mixedname.TXT');const storage=file('case-storage');t.storageUri=Uri.file(storage);
         assert.equal((await t.applyConfiguredMonitoringScope(scope([{scope:'all',path:relative(alias)}]))).status,'applied');
         assert.equal(t.getOriginalContent(actual),'baseline');assert.equal(t.getOriginalContent(alias),'baseline');
         fs.writeFileSync(actual,'changed');await t.readFileAndUpdate(actual,Uri.file(actual));
