@@ -48,6 +48,6 @@ test('staged hover disables Accept and retains Reject', () => {
     const text = provider.provideHover(document, { line: 0, character: 11 }).contents.value;
     assert.match(text, /Staged revision/);
     assert.match(text, /`✓ Accept`/);
-    assert.doesNotMatch(text, /command:diffTracker.acceptGitRevision/);
-    assert.match(text, /command:diffTracker.rejectGitRevision/);
+    assert.doesNotMatch(text, /command:DocRevision.acceptGitRevision/);
+    assert.match(text, /command:DocRevision.rejectGitRevision/);
 });

@@ -30,10 +30,10 @@ export class GitRevisionHoverProvider implements vscode.HoverProvider {
         const args = encodeURIComponent(JSON.stringify([revision]));
         const staged = this.gitRevision.isStaged(document);
         const actions = revision
-            ? `${staged ? '`✓ Accept`' : `[✓ Accept](command:diffTracker.acceptGitRevision?${args})`}　[↩ Reject](command:diffTracker.rejectGitRevision?${args})　`
+            ? `${staged ? '`✓ Accept`' : `[✓ Accept](command:DocRevision.acceptGitRevision?${args})`}　[↩ Reject](command:DocRevision.rejectGitRevision?${args})　`
             : '';
-        const markdown = new vscode.MarkdownString(`**${staged ? 'Staged revision' : 'Git revision'} · ${location.index} / ${location.total}**\n\n${actions}[↑](command:diffTracker.previousChange)　[↓](command:diffTracker.nextChange)`);
-        markdown.isTrusted = { enabledCommands: ['diffTracker.acceptGitRevision', 'diffTracker.rejectGitRevision', 'diffTracker.previousChange', 'diffTracker.nextChange'] };
+        const markdown = new vscode.MarkdownString(`**${staged ? 'Staged revision' : 'Git revision'} · ${location.index} / ${location.total}**\n\n${actions}[↑](command:DocRevision.previousChange)　[↓](command:DocRevision.nextChange)`);
+        markdown.isTrusted = { enabledCommands: ['DocRevision.acceptGitRevision', 'DocRevision.rejectGitRevision', 'DocRevision.previousChange', 'DocRevision.nextChange'] };
         const deleted = this.gitRevision.getDeletedText(document, position, revision);
         if (!deleted) { return new vscode.Hover(markdown, location.range); }
         const fenceLength = (deleted.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length + 1), 3);

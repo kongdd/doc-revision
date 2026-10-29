@@ -120,13 +120,13 @@ export class GitRevision implements vscode.Disposable {
 
     constructor(private decorations: DecorationManager, private onChange: () => void = () => {}) {
         this.subscriptions = [
-            vscode.commands.registerCommand('diffTracker.toggleGitRevisions', () => this.toggle()),
+            vscode.commands.registerCommand('DocRevision.toggleGitRevisions', () => this.toggle()),
             vscode.window.onDidChangeActiveTextEditor(() => void this.sync()),
             vscode.window.onDidChangeVisibleTextEditors(() => void this.sync()),
             vscode.workspace.onDidChangeConfiguration(event => {
-                if (event.affectsConfiguration('diffTracker.showRevisions')) { void this.sync(); }
-                else if (event.affectsConfiguration('diffTracker.showAllChanges')) { void this.sync(true); }
-                else if (event.affectsConfiguration('diffTracker')) { this.invalidate(); }
+                if (event.affectsConfiguration('DocRevision.showRevisions')) { void this.sync(); }
+                else if (event.affectsConfiguration('DocRevision.showAllChanges')) { void this.sync(true); }
+                else if (event.affectsConfiguration('DocRevision')) { this.invalidate(); }
             }),
             vscode.workspace.onDidChangeTextDocument(event => {
                 if (event.document === revisionEditor()?.document) { this.schedule(); }
@@ -143,7 +143,7 @@ export class GitRevision implements vscode.Disposable {
         this.enabled = revisionConfig().get<boolean>('showRevisions', false);
         this.log.info(`sync enabled=${this.enabled} editor=${revisionEditor()?.document.uri.toString() ?? 'none'}`);
         this.decorations.gitRevisionMode = this.enabled;
-        void vscode.commands.executeCommand('setContext', 'diffTracker.gitRevisions', this.enabled);
+        void vscode.commands.executeCommand('setContext', 'DocRevision.gitRevisions', this.enabled);
         this.onChange();
         if (this.enabled) {
             await this.refresh(notify);

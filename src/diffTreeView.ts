@@ -16,21 +16,21 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
             const { index, total } = this.getPosition();
             const position = new vscode.TreeItem(`修订 ${index || (total ? '—' : 0)} / ${total}`, vscode.TreeItemCollapsibleState.None);
             position.iconPath = new vscode.ThemeIcon('list-ordered');
-            return [position, this.item('上一处', '', 'arrow-up', 'diffTracker.previousChange'),
-                this.item('下一处', '', 'arrow-down', 'diffTracker.nextChange'),
-                this.item('接受选中行', '', 'check', 'diffTracker.acceptSelection'),
-                this.item('拒绝选中行', '', 'discard', 'diffTracker.rejectSelection'),
-                this.item('全部接受', '', 'check-all', 'diffTracker.acceptAllRevisions'),
-                this.item('全部拒绝', '', 'discard', 'diffTracker.rejectAllRevisions')];
+            return [position, this.item('上一处', '', 'arrow-up', 'DocRevision.previousChange'),
+                this.item('下一处', '', 'arrow-down', 'DocRevision.nextChange'),
+                this.item('接受选中行', '', 'check', 'DocRevision.acceptSelection'),
+                this.item('拒绝选中行', '', 'discard', 'DocRevision.rejectSelection'),
+                this.item('全部接受', '', 'check-all', 'DocRevision.acceptAllRevisions'),
+                this.item('全部拒绝', '', 'discard', 'DocRevision.rejectAllRevisions')];
         }
         const enabled = this.isEnabled();
         const highlight = revisionConfig().get<boolean>('highlightModifiedLines', false);
         const showAll = revisionConfig().get<boolean>('showAllChanges', false);
         return [
-            this.item('显示修订', enabled ? '已开启' : '已关闭', enabled ? 'eye' : 'eye-closed', 'diffTracker.toggleGitRevisions'),
-            this.item('行背景色', highlight ? '已开启' : '已关闭', highlight ? 'eye' : 'eye-closed', 'diffTracker.toggleHighlight'),
-            this.item('Show Unstaged', '', showAll ? 'circle-large-outline' : 'check', 'diffTracker.showUnstaged'),
-            this.item('Show All Changes', '', showAll ? 'check' : 'circle-large-outline', 'diffTracker.showAllChanges')
+            this.item('显示修订', enabled ? '已开启' : '已关闭', enabled ? 'eye' : 'eye-closed', 'DocRevision.toggleGitRevisions'),
+            this.item('行背景色', highlight ? '已开启' : '已关闭', highlight ? 'eye' : 'eye-closed', 'DocRevision.toggleHighlight'),
+            this.item('Show Unstaged', '', showAll ? 'circle-large-outline' : 'check', 'DocRevision.showUnstaged'),
+            this.item('Show All Changes', '', showAll ? 'check' : 'circle-large-outline', 'DocRevision.showAllChanges')
         ];
     }
 

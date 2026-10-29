@@ -92,7 +92,7 @@ export class DecorationManager {
 
     public renderLineChanges(editor: vscode.TextEditor, lineChanges: readonly LineChange[]) {
         // Read settings
-        const config = vscode.workspace.getConfiguration('diffTracker', editor.document.uri);
+        const config = vscode.workspace.getConfiguration('DocRevision', editor.document.uri);
         const showDeletedBadge = config.get<boolean>('showDeletedLinesBadge', true);
         const showDeletedTextInline = config.get<boolean>('showDeletedTextInline', true);
         const highlightAdded = config.get<boolean>('highlightAddedLines', true);

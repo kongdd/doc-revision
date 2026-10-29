@@ -12,7 +12,7 @@ export function currentFolder(): vscode.WorkspaceFolder | undefined {
 }
 
 export function revisionConfig(): vscode.WorkspaceConfiguration {
-    return vscode.workspace.getConfiguration('diffTracker', currentFolder()?.uri);
+    return vscode.workspace.getConfiguration('DocRevision', currentFolder()?.uri);
 }
 
 export async function setRevisionSetting(key: 'showRevisions' | 'showAllChanges' | 'highlightModifiedLines', value?: boolean): Promise<boolean> {
@@ -21,7 +21,7 @@ export async function setRevisionSetting(key: 'showRevisions' | 'showAllChanges'
         void vscode.window.showWarningMessage('请先打开当前文件所在的工作区文件夹。');
         return false;
     }
-    const config = vscode.workspace.getConfiguration('diffTracker', folder.uri);
+    const config = vscode.workspace.getConfiguration('DocRevision', folder.uri);
     await config.update(key, value ?? !config.get<boolean>(key, false), vscode.ConfigurationTarget.WorkspaceFolder);
     return true;
 }

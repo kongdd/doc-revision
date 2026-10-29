@@ -1,10 +1,23 @@
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
 import { DecorationManager } from './decorationManager';
 import { DiffTreeDataProvider } from './diffTreeView';
 import { GitInlineRevision, GitRevision } from './gitRevision';
 import { ChangePositionTracker, navigateAndShowChange } from './changeNavigation';
 import { GitRevisionHoverProvider } from './revisionHover';
 import { revisionEditor, setRevisionSetting } from './revisionSettings';
+
+function openSublimeMerge(): void {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    const folder = uri && vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder || folder.uri.scheme !== 'file') {
+        void vscode.window.showWarningMessage('当前文件不在本地工作区中。');
+        return;
+    }
+    execFile('smerge', [folder.uri.fsPath], error => {
+        if (error) { void vscode.window.showWarningMessage(`无法打开 Sublime Merge：${error.message}`); }
+    });
+}
 
 export function activate(context: vscode.ExtensionContext): void {
     const decorations = new DecorationManager();
@@ -18,15 +31,16 @@ export function activate(context: vscode.ExtensionContext): void {
     const revisions = new GitRevision(decorations, () => { tree.refresh(); navigation.refresh(); });
     const hover = new GitRevisionHoverProvider(revisions);
     context.subscriptions.push(decorations, tree, navigation, revisions,
-        vscode.window.createTreeView('diffTracker.changesView', { treeDataProvider: tree }),
-        vscode.window.createTreeView('diffTracker.navigationView', { treeDataProvider: navigation }),
+        vscode.window.createTreeView('DocRevision.changesView', { treeDataProvider: tree }),
+        vscode.window.createTreeView('DocRevision.navigationView', { treeDataProvider: navigation }),
         vscode.languages.registerHoverProvider({ scheme: 'file' }, hover),
         vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('diffTracker.highlightModifiedLines') || event.affectsConfiguration('diffTracker.showAllChanges')) { tree.refresh(); }
+            if (event.affectsConfiguration('DocRevision.highlightModifiedLines') || event.affectsConfiguration('DocRevision.showAllChanges')) { tree.refresh(); }
         }),
-        vscode.commands.registerCommand('diffTracker.toggleHighlight', () => setRevisionSetting('highlightModifiedLines')),
-        vscode.commands.registerCommand('diffTracker.showUnstaged', () => setRevisionSetting('showAllChanges', false)),
-        vscode.commands.registerCommand('diffTracker.showAllChanges', () => setRevisionSetting('showAllChanges', true)),
+        vscode.commands.registerCommand('DocRevision.toggleHighlight', () => setRevisionSetting('highlightModifiedLines')),
+        vscode.commands.registerCommand('DocRevision.showUnstaged', () => setRevisionSetting('showAllChanges', false)),
+        vscode.commands.registerCommand('DocRevision.showAllChanges', () => setRevisionSetting('showAllChanges', true)),
+        vscode.commands.registerCommand('DocRevision.openSublimeMerge', openSublimeMerge),
         vscode.window.onDidChangeTextEditorSelection(event => {
             if (event.textEditor === vscode.window.activeTextEditor) { navigation.refresh(); }
             if (event.kind !== vscode.TextEditorSelectionChangeKind.Mouse || event.textEditor !== vscode.window.activeTextEditor ||
@@ -37,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
     for (const action of ['accept', 'reject'] as const) {
-        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${action}GitRevision`, async (revision: GitInlineRevision) => {
+        context.subscriptions.push(vscode.commands.registerCommand(`DocRevision.${action}GitRevision`, async (revision: GitInlineRevision) => {
             if (!revision) { return; }
             try {
                 await revisions.applyInlineRevision(revision, action);
@@ -47,7 +61,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }));
     }
     for (const [action, scope] of [['accept', 'AllRevisions'], ['reject', 'AllRevisions'], ['accept', 'Selection'], ['reject', 'Selection']] as const) {
-        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${action}${scope}`, async () => {
+        context.subscriptions.push(vscode.commands.registerCommand(`DocRevision.${action}${scope}`, async () => {
             const editor = revisionEditor();
             const ref = editor && revisions.getAllRevisions(editor.document);
             if (!ref) { void vscode.window.showInformationMessage('当前文件没有可处理的修订。'); return; }
@@ -70,7 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }));
     }
     for (const [command, direction] of [['previous', -1], ['next', 1]] as const) {
-        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${command}Change`, async () => {
+        context.subscriptions.push(vscode.commands.registerCommand(`DocRevision.${command}Change`, async () => {
             if (!decorations.gitRevisionMode) {
                 void vscode.window.showInformationMessage('请先开启修订模式。');
                 return;

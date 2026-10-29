@@ -41,26 +41,26 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "*",
-    "onView:diffTracker.changesView"
+    "onView:DocRevision.changesView"
   ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "diffTracker",
+          "id": "DocRevision",
           "title": "Document Revision",
           "icon": "resources/record-icon.svg"
         }
       ]
     },
     "views": {
-      "diffTracker": [
+      "DocRevision": [
         {
-          "id": "diffTracker.changesView",
+          "id": "DocRevision.changesView",
           "name": "修订"
         },
         {
-          "id": "diffTracker.navigationView",
+          "id": "DocRevision.navigationView",
           "name": "修订导航"
         }
       ]
@@ -68,40 +68,40 @@
     "configuration": {
       "title": "Document Revision",
       "properties": {
-        "diffTracker.showRevisions": {
+        "DocRevision.showRevisions": {
           "type": "boolean",
           "default": false,
           "scope": "resource",
           "description": "Show Git revisions for the current workspace folder."
         },
-        "diffTracker.showAllChanges": {
+        "DocRevision.showAllChanges": {
           "type": "boolean",
           "default": false,
           "scope": "resource",
           "description": "Show the net changes against HEAD instead of unstaged changes."
         },
-        "diffTracker.showDeletedLinesBadge": {
+        "DocRevision.showDeletedLinesBadge": {
           "type": "boolean",
           "default": true,
           "description": "Show a badge indicating deleted lines"
         },
-        "diffTracker.showDeletedTextInline": {
+        "DocRevision.showDeletedTextInline": {
           "type": "boolean",
           "default": true,
           "description": "Render removed text as red strike-through ghost text inside editable editors (including .typ). Does not modify source files or Typst preview."
         },
-        "diffTracker.highlightAddedLines": {
+        "DocRevision.highlightAddedLines": {
           "type": "boolean",
           "default": true,
           "description": "Highlight added lines with green background"
         },
-        "diffTracker.highlightModifiedLines": {
+        "DocRevision.highlightModifiedLines": {
           "type": "boolean",
           "default": false,
           "scope": "resource",
           "description": "Highlight modified lines with a background color"
         },
-        "diffTracker.highlightWordChanges": {
+        "DocRevision.highlightWordChanges": {
           "type": "boolean",
           "default": true,
           "description": "Highlight word-level changes within modified lines"
@@ -110,46 +110,56 @@
     },
     "commands": [
       {
-        "command": "diffTracker.previousChange",
+        "command": "DocRevision.openSublimeMerge",
+        "title": "Open Workspace in Sublime Merge",
+        "category": "Document Revision"
+      },
+      {
+        "command": "DocRevision.previousChange",
         "title": "Previous Change",
         "category": "Document Revision",
         "icon": "$(arrow-up)"
       },
       {
-        "command": "diffTracker.nextChange",
+        "command": "DocRevision.nextChange",
         "title": "Next Change",
         "category": "Document Revision",
         "icon": "$(arrow-down)"
       },
       {
-        "command": "diffTracker.acceptAllRevisions",
+        "command": "DocRevision.acceptAllRevisions",
         "title": "全部接受当前文件的修订",
         "category": "Document Revision"
       },
       {
-        "command": "diffTracker.rejectAllRevisions",
+        "command": "DocRevision.rejectAllRevisions",
         "title": "全部拒绝当前文件的修订",
         "category": "Document Revision"
       },
       {
-        "command": "diffTracker.acceptSelection",
+        "command": "DocRevision.acceptSelection",
         "title": "接受选中行的修订",
         "category": "Document Revision"
       },
       {
-        "command": "diffTracker.rejectSelection",
+        "command": "DocRevision.rejectSelection",
         "title": "拒绝选中行的修订",
         "category": "Document Revision"
       },
       {
-        "command": "diffTracker.toggleGitRevisions",
+        "command": "DocRevision.toggleGitRevisions",
         "title": "Toggle Git Revisions for Current File",
         "category": "Document Revision"
       }
     ],
     "keybindings": [
       {
-        "command": "diffTracker.toggleGitRevisions",
+        "command": "DocRevision.openSublimeMerge",
+        "key": "cmd+ctrl+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "DocRevision.toggleGitRevisions",
         "key": "shift+alt+g",
         "mac": "shift+option+g",
         "when": "editorTextFocus && resourceScheme == file"

@@ -16,6 +16,8 @@ Sidebar settings are saved in the current workspace folder's `.vscode/settings.j
 
 ## Limitations
 
+- After upgrading, replace the `diffTracker.` prefix in existing settings and custom keybindings with `DocRevision.`.
+
 - The built-in VS Code Git extension must be enabled. Files not yet in the index, or files absent from HEAD in the all-changes view, are not supported. Staged changes reversed in the working tree have no net difference and are not shown.
 - Changes only to line-ending format (CRLF/LF) or the final newline are not shown as separate revisions.
 - Files are limited to 1 MiB. Deleted text in the editor is virtual; copy it from the revision hover instead.
