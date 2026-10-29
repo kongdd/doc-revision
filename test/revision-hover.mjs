@@ -19,7 +19,7 @@ vm.runInNewContext(source, { module, exports: module.exports, require: name => {
 
 test('Git hover provides revision actions, navigation and current position', () => {
     const document = { uri: { scheme: 'file' }, lineCount: 1, lineAt: () => ({ text: 'The quick red fox and sleepy dog' }) };
-    const provider = new module.exports.GitRevisionHoverProvider({ getChanges: () => [{}], getInlineRevision: () => ({ request: 1 }), getDeletedText: () => undefined, isStaged: () => false, isMixed: () => false });
+    const provider = new module.exports.GitRevisionHoverProvider({ getChanges: () => [{}], getInlineRevision: () => ({ request: 1 }), getDeletedText: () => undefined, isStaged: () => false });
     const hover = provider.provideHover(document, { line: 0, character: 11 });
     assert.match(hover.contents.value, /Accept/);
     assert.match(hover.contents.value, /Reject/);
@@ -34,7 +34,7 @@ test('hover exposes full deleted text for partial selection without trusting its
     const document = { uri: { scheme: 'file' }, lineCount: 1, lineAt: () => ({ text: 'edited' }) };
     const deleted = 'first ``` line\n[link](command:danger)';
     const provider = new module.exports.GitRevisionHoverProvider({ getChanges: () => [{}],
-        getInlineRevision: () => ({ request: 1 }), getDeletedText: () => deleted, isStaged: () => false, isMixed: () => false });
+        getInlineRevision: () => ({ request: 1 }), getDeletedText: () => deleted, isStaged: () => false });
     const hover = provider.provideHover(document, { line: 0, character: 11 });
     assert.equal(hover.contents.length, 2);
     assert.ok(hover.contents[1].value.includes(deleted));
@@ -44,7 +44,7 @@ test('hover exposes full deleted text for partial selection without trusting its
 
 test('staged hover disables Accept and retains Reject', () => {
     const document = { uri: { scheme: 'file' }, lineCount: 1, lineAt: () => ({ text: 'The quick red fox and sleepy dog' }) };
-    const provider = new module.exports.GitRevisionHoverProvider({ getChanges: () => [{}], getInlineRevision: () => ({ request: 1 }), getDeletedText: () => undefined, isStaged: () => true, isMixed: () => false });
+    const provider = new module.exports.GitRevisionHoverProvider({ getChanges: () => [{}], getInlineRevision: () => ({ request: 1 }), getDeletedText: () => undefined, isStaged: () => true });
     const text = provider.provideHover(document, { line: 0, character: 11 }).contents.value;
     assert.match(text, /Staged revision/);
     assert.match(text, /`✓ Accept`/);

@@ -50,7 +50,6 @@ export function activate(context: vscode.ExtensionContext): void {
             const editor = revisionEditor();
             const ref = editor && revisions.getAllRevisions(editor.document);
             if (!ref) { void vscode.window.showInformationMessage('当前文件没有可处理的修订。'); return; }
-            if (ref.mixed) { void vscode.window.showWarningMessage('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); return; }
             if (ref.staged && action === 'accept') { void vscode.window.showInformationMessage('修订已暂存，无法再次接受。'); return; }
             const selected = scope === 'Selection';
             if (selected && editor.selections.every(selection => selection.isEmpty)) { void vscode.window.showInformationMessage('请先选中要处理的行。'); return; }

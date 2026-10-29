@@ -33,7 +33,6 @@ export interface GitAllRevisions {
     request: number;
     version: number;
     staged: boolean;
-    mixed: boolean;
     file: string;
 }
 
@@ -77,7 +76,7 @@ export class GitRevision implements vscode.Disposable {
     private api?: GitApi;
     private apiListeners: vscode.Disposable[] = [];
     private current?: { document: vscode.TextDocument; version: number; changes: LineChange[]; original: string;
-        staged: boolean; mixed: boolean; request: number; repository: Repository; commit: string; file: string; gitPath: string };
+        staged: boolean; mixed: boolean; index: string; request: number; repository: Repository; commit: string; file: string; gitPath: string };
     private readonly log = vscode.window.createOutputChannel('Git Revisions', { log: true });
     private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     private readonly subscriptions: vscode.Disposable[];
@@ -179,7 +178,7 @@ export class GitRevision implements vscode.Disposable {
                 throw new Error('Git revisions are limited to files of 1 MiB.');
             }
             const changes = getLineChanges(original, editor.document.getText());
-            this.current = { document: editor.document, version, changes, original, staged, mixed, request, repository, commit, file, gitPath: api.git.path };
+            this.current = { document: editor.document, version, changes, original, staged, mixed, index, request, repository, commit, file, gitPath: api.git.path };
             this.status.tooltip = showAll ? 'Showing net changes against HEAD. Click to hide.' :
                 'Showing unstaged changes against the Git index. Click to hide.';
             this.decorations.renderLineChanges(editor, changes);
@@ -239,7 +238,6 @@ export class GitRevision implements vscode.Disposable {
             current.request !== ref.request || current.document.version !== ref.version || current.repository.state.HEAD?.commit !== current.commit) {
             throw new Error('Revision is stale; review it again.');
         }
-        if (current.mixed) { throw new Error('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); }
         if (current.staged && action === 'accept') { throw new Error('Staged revisions cannot be accepted again.'); }
         const text = current.document.getText();
         let oldStart: number, oldEnd: number, newStart: number, newEnd: number;
@@ -276,7 +274,7 @@ export class GitRevision implements vscode.Disposable {
     public getAllRevisions(document: vscode.TextDocument): GitAllRevisions | undefined {
         const current = this.current;
         if (!this.enabled || !current || current.document !== document || current.version !== document.version || !current.changes.some(change => change.type !== 'unchanged')) { return; }
-        return { request: current.request, version: current.version, staged: current.staged, mixed: current.mixed, file: current.file };
+        return { request: current.request, version: current.version, staged: current.staged, file: current.file };
     }
 
     public async applyAllRevisions(ref: GitAllRevisions, action: 'accept' | 'reject', selections?: readonly vscode.Range[]): Promise<void> {
@@ -285,7 +283,6 @@ export class GitRevision implements vscode.Disposable {
             current.version !== ref.version || current.document.version !== ref.version || current.repository.state.HEAD?.commit !== current.commit) {
             throw new Error('修订已变化，请重新操作。');
         }
-        if (current.mixed) { throw new Error('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); }
         if (current.staged && action === 'accept') { throw new Error('修订已暂存，无法再次接受。'); }
         const document = current.document;
         const lines = selections?.map(range => [range.start.line, range.end.line > range.start.line && !range.end.character ? range.end.line - 1 : range.end.line]);
@@ -301,36 +298,12 @@ export class GitRevision implements vscode.Disposable {
         const text = current.document.getText();
         const indexText = await current.repository.show('', current.file);
         if (this.current !== current || current.document.version !== current.version ||
-            current.repository.state.HEAD?.commit !== current.commit || indexText !== (current.staged ? text : current.original)) {
+            current.repository.state.HEAD?.commit !== current.commit || indexText !== current.index) {
             throw new Error('Index or document changed; review again.');
-        }
-        if (action === 'reject' && !current.staged) {
-            const edit = new vscode.WorkspaceEdit();
-            for (const { oldStart, oldEnd, newStart, newEnd } of blocks) {
-                edit.replace(current.document.uri, new vscode.Range(current.document.positionAt(newStart), current.document.positionAt(newEnd)),
-                    current.original.slice(oldStart, oldEnd));
-            }
-            if (!await vscode.workspace.applyEdit(edit)) { throw new Error('Could not discard the revision.'); }
-            return;
         }
         if (/[\x00\r\n\t\\]/.test(current.file) || current.file.startsWith('/') || current.file.startsWith('../')) {
             throw new Error('This path cannot be staged safely.');
         }
-        let next = current.staged ? text : current.original;
-        for (const { oldStart, oldEnd, newStart, newEnd } of [...blocks].reverse()) {
-            next = current.staged
-                ? next.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + next.slice(newEnd)
-                : next.slice(0, oldStart) + text.slice(newStart, newEnd) + next.slice(oldEnd);
-        }
-        if (current.staged) {
-            if (current.document.isDirty) { throw new Error('请先保存或处理未暂存的修改。'); }
-            const disk = await vscode.workspace.fs.readFile(current.document.uri);
-            if (this.current !== current || current.document.isDirty || current.document.version !== current.version ||
-                current.repository.state.HEAD?.commit !== current.commit || !Buffer.from(disk).equals(Buffer.from(text, 'utf8'))) {
-                throw new Error('工作区文件已变更；未丢弃修订。');
-            }
-        }
-        const patch = Diff.createTwoFilesPatch(`a/${current.file}`, `b/${current.file}`, current.staged ? text : current.original, next, '', '');
         const git = (args: string[], input?: string) => new Promise<void>((resolve, reject) => {
             const child = spawn(current.gitPath, args, { cwd: current.repository.rootUri.fsPath });
             let error = '';
@@ -340,17 +313,48 @@ export class GitRevision implements vscode.Disposable {
             child.stdin.on('error', () => {});
             child.stdin.end(input);
         });
-        // Rewritten files with unchanged content leave stale stat data, which `git apply --index` rejects.
-        if (current.staged) { await git(['update-index', '-q', '--refresh']); }
-        await git(['apply', current.staged ? '--index' : '--cached', '--whitespace=nowarn', '-'], patch);
+        // Mixed changes: the index differs from the patch base, so keep context small and let Git relocate hunks.
+        const context = current.mixed ? 1 : 4;
+        const patch = (from: string, to: string) => Diff.createTwoFilesPatch(`a/${current.file}`, `b/${current.file}`, from, to, '', '', { context });
+        const apply = (...args: string[]) => ['apply', ...args, '--whitespace=nowarn', ...current.mixed ? ['-C1'] : [], '-'];
+        // Replace each revision in the editor text with its HEAD/index baseline.
+        let reverted = text;
+        for (const { oldStart, oldEnd, newStart, newEnd } of [...blocks].reverse()) {
+            reverted = reverted.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + reverted.slice(newEnd);
+        }
+        if (action === 'reject' && !current.staged) {
+            // Staged and unstaged changes coexist: also unstage this revision when the index still holds it.
+            if (current.mixed) {
+                await git(apply('--cached', '--check'), patch(text, reverted)).then(() => git(apply('--cached'), patch(text, reverted)), () => undefined);
+            }
+            const edit = new vscode.WorkspaceEdit();
+            for (const { oldStart, oldEnd, newStart, newEnd } of blocks) {
+                edit.replace(current.document.uri, new vscode.Range(current.document.positionAt(newStart), current.document.positionAt(newEnd)),
+                    current.original.slice(oldStart, oldEnd));
+            }
+            if (!await vscode.workspace.applyEdit(edit)) { throw new Error('Could not discard the revision.'); }
+            return;
+        }
+        let accepted = current.original;
+        for (const { oldStart, oldEnd, newStart, newEnd } of [...blocks].reverse()) {
+            accepted = accepted.slice(0, oldStart) + text.slice(newStart, newEnd) + accepted.slice(oldEnd);
+        }
+        if (current.staged) {
+            if (current.document.isDirty) { throw new Error('请先保存或处理未暂存的修改。'); }
+            const disk = await vscode.workspace.fs.readFile(current.document.uri);
+            if (this.current !== current || current.document.isDirty || current.document.version !== current.version ||
+                current.repository.state.HEAD?.commit !== current.commit || !Buffer.from(disk).equals(Buffer.from(text, 'utf8'))) {
+                throw new Error('工作区文件已变更；未丢弃修订。');
+            }
+            // Rewritten files with unchanged content leave stale stat data, which `git apply --index` rejects.
+            await git(['update-index', '-q', '--refresh']);
+        }
+        await git(apply(current.staged ? '--index' : '--cached'), current.staged ? patch(text, reverted) : patch(current.original, accepted))
+            .catch(error => { throw current.mixed ? new Error('该修订与暂存区中相邻的修改冲突，无法单独接受。') : error; });
         this.schedule();
         if (current.staged && current.document.isDirty) {
             throw new Error('已丢弃暂存区和磁盘中的修订；编辑器有未保存的修改，请检查后保存。');
         }
-    }
-
-    public isMixed(document: vscode.TextDocument): boolean {
-        return this.enabled && this.current?.document === document && this.current.version === document.version && this.current.mixed;
     }
 
     public isStaged(document: vscode.TextDocument): boolean {

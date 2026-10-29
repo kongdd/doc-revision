@@ -29,8 +29,7 @@ export class GitRevisionHoverProvider implements vscode.HoverProvider {
         const revision = this.gitRevision.getInlineRevision(document, position);
         const args = encodeURIComponent(JSON.stringify([revision]));
         const staged = this.gitRevision.isStaged(document);
-        const mixed = this.gitRevision.isMixed(document);
-        const actions = mixed ? '暂存与未暂存混合：请切换到 Show Unstaged。\n\n' : revision
+        const actions = revision
             ? `${staged ? '`✓ Accept`' : `[✓ Accept](command:diffTracker.acceptGitRevision?${args})`}　[↩ Reject](command:diffTracker.rejectGitRevision?${args})　`
             : '';
         const markdown = new vscode.MarkdownString(`**${staged ? 'Staged revision' : 'Git revision'} · ${location.index} / ${location.total}**\n\n${actions}[↑](command:diffTracker.previousChange)　[↓](command:diffTracker.nextChange)`);

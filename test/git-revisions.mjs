@@ -201,12 +201,10 @@ test('selection reject restores only the selected lines', async () => {
     h.instance.dispose();
 });
 
-test('all actions reject stale or mixed changes', async () => {
+test('all actions reject stale changes', async () => {
     const h = setup(async ref => ref ? 'HEAD' : 'index', { current: 'buffer', staged: true });
     await h.events.toggle();
     const ref = h.instance.getAllRevisions(h.document);
-    await assert.rejects(h.instance.applyAllRevisions(ref, 'accept'), /同时存在/);
-    await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /同时存在/);
     h.document.version++;
     await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /修订已变化/);
     h.instance.dispose();
@@ -348,18 +346,41 @@ test('reject staged revision discards only that revision from index and disk', a
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('all changes mode shows mixed changes but prevents unsafe actions', async () => {
-    const head = 'The quick brown fox and lazy dog\n';
-    const index = 'The quick red fox and lazy dog\n';
-    const current = 'The quick red fox and sleepy dog\n';
-    const h = setup(async ref => ref ? head : index, { current, staged: true });
-    await h.events.toggle();
-    assert.equal(h.instance.isMixed(h.document), true);
-    assert.equal(h.renders[0][0].oldText, head.trimEnd());
-    assert.equal(h.renders[0][0].newText, current.trimEnd());
-    const ref = h.instance.getInlineRevision(h.document, { line: 0, character: 11 });
-    await assert.rejects(h.instance.applyInlineRevision(ref, 'reject'), /同时存在/);
-    h.instance.dispose();
+test('all changes mode acts on one revision when staged and unstaged changes coexist', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-revision-mixed-'));
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    try {
+        git('init', '-q');
+        git('config', 'user.email', 'test@example.com');
+        git('config', 'user.name', 'Test');
+        const head = 'a\nb\nc\nd\ne\nf\n';
+        const index = 'A\nb\nc\nd\ne\nf\n';
+        const current = 'A\nb\nc\nd\ne\nF\n';
+        fs.writeFileSync(path.join(root, 'a.txt'), head);
+        git('add', 'a.txt');
+        git('commit', '-qm', 'baseline');
+        const commit = git('rev-parse', 'HEAD').trim();
+        fs.writeFileSync(path.join(root, 'a.txt'), index);
+        git('add', 'a.txt');
+        const h = setup(async ref => git('show', `${ref || ''}:a.txt`), { root, commit, current, staged: true });
+        await h.events.toggle();
+        const select = line => [{ start: { line, character: 0 }, end: { line, character: 1 } }];
+        const ref = h.instance.getAllRevisions(h.document);
+        await h.instance.applyAllRevisions(ref, 'accept', select(5));
+        assert.equal(git('show', ':a.txt'), 'A\nb\nc\nd\ne\nF\n');
+        h.instance.dispose();
+
+        git('reset', '-q', '--hard');
+        fs.writeFileSync(path.join(root, 'a.txt'), index);
+        git('add', 'a.txt');
+        const reject = setup(async ref => git('show', `${ref || ''}:a.txt`), { root, commit, current, staged: true });
+        await reject.events.toggle();
+        await reject.instance.applyAllRevisions(reject.instance.getAllRevisions(reject.document), 'reject', select(0));
+        assert.equal(git('show', ':a.txt'), head);
+        assert.equal(reject.edits.length, 1);
+        assert.equal(reject.edits[0].text, 'a\n');
+        reject.instance.dispose();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('reject restores only the selected text in the editor buffer', async () => {

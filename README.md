@@ -10,7 +10,7 @@ Review unstaged Git changes in the current file using a Word-style revision mode
 4. **Accept** stages the selected revision. **Reject** reverts it in the editor buffer; save the file to persist the revert. Use **Accept All** or **Reject All** in the revision navigation view to process the current file after confirmation, or select lines and choose **Accept/Reject Selected Revisions** from the editor context menu.
 5. For deleted text, select and copy from the revision hover.
 
-Choose **Show Unstaged** or **Show All Changes** (net changes against HEAD). For staged revisions, Accept is disabled and Reject discards the selected change from both index and disk. When staged and unstaged changes coexist, the all-changes view is read-only; switch to Show Unstaged to review unstaged changes.
+Choose **Show Unstaged** or **Show All Changes** (net changes against HEAD). For staged revisions, Accept is disabled and Reject discards the selected change from both index and disk. When staged and unstaged changes coexist, Accept stages a revision and Reject reverts it in both the buffer and, when present, the index; if adjacent staged edits conflict, Git reports it.
 
 Sidebar settings are saved in the current workspace folder's `.vscode/settings.json` and restored on reopening. Backgrounds are off by default; inline revision markers remain visible.
 
