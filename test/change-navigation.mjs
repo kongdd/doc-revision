@@ -19,7 +19,7 @@ const vscode = { Position, Selection, Range, TextEditorRevealType: { InCenter: 0
 const module = { exports: {} };
 const source = ts.transpileModule(fs.readFileSync('src/changeNavigation.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 vm.runInNewContext(source, { module, exports: module.exports, require: name => name === 'vscode' ? vscode : require('../out/utils/liveDeletedText') });
-const { getChangeLocations, getChangePosition, navigateChanges, navigateAndShowChange } = module.exports;
+const { ChangePositionTracker, getChangeLocations, getChangePosition, navigateChanges, navigateAndShowChange } = module.exports;
 
 test('navigate individual edits on one line and wrap in both directions', () => {
     const text = 'The quick red fox jumps over the sleepy dog.';
@@ -40,6 +40,24 @@ test('navigate individual edits on one line and wrap in both directions', () => 
     assert.equal(editor.selection.start.character, locations[0].start);
     navigateChanges(editor, changes, -1);
     assert.equal(editor.selection.start.character, locations[1].start);
+});
+
+test('navigation count stays visible while recalculating and resets for another file or no changes', () => {
+    const text = 'The quick red fox';
+    const changes = [{ type: 'modified', lineNumber: 1, oldText: 'The quick brown fox', newText: text }];
+    const document = { lineCount: 1, lineAt: () => ({ text }) };
+    const editor = { document, selection: new Selection(new Position(0, 10), new Position(0, 10)) };
+    const tracker = new ChangePositionTracker();
+    const position = (target, revisions) => {
+        const { index, total } = tracker.getPosition(target, revisions);
+        return [index, total];
+    };
+    assert.deepEqual(position(editor, changes), [1, 1]);
+    assert.deepEqual(position(editor, undefined), [1, 1]);
+    assert.deepEqual(position(editor, []), [0, 0]);
+    assert.deepEqual(position(editor, changes), [1, 1]);
+    assert.deepEqual(position({ ...editor, document: { ...document } }, undefined), [0, 0]);
+    assert.deepEqual(position(undefined, undefined), [0, 0]);
 });
 
 test('navigation closes the old hover before showing the new cursor position', async () => {

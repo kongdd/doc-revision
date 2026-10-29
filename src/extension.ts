@@ -2,15 +2,16 @@ import * as vscode from 'vscode';
 import { DecorationManager } from './decorationManager';
 import { DiffTreeDataProvider } from './diffTreeView';
 import { GitInlineRevision, GitRevision } from './gitRevision';
-import { getChangePosition, navigateAndShowChange } from './changeNavigation';
+import { ChangePositionTracker, navigateAndShowChange } from './changeNavigation';
 import { GitRevisionHoverProvider } from './revisionHover';
 import { revisionEditor, setRevisionSetting } from './revisionSettings';
 
 export function activate(context: vscode.ExtensionContext): void {
     const decorations = new DecorationManager();
+    const positions = new ChangePositionTracker();
     const getPosition = () => {
         const editor = revisionEditor();
-        return editor ? getChangePosition(editor, revisions.getChanges(editor.document)) : { index: 0, total: 0 };
+        return positions.getPosition(editor, editor ? revisions.getNavigationChanges(editor.document) : undefined);
     };
     const tree = new DiffTreeDataProvider(() => decorations.gitRevisionMode, getPosition);
     const navigation = new DiffTreeDataProvider(() => decorations.gitRevisionMode, getPosition, true);

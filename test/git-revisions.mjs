@@ -125,6 +125,24 @@ test('typing reuses cached Git content and Git state changes reload it', async (
     h.instance.dispose();
 });
 
+test('navigation distinguishes an edited document awaiting refresh from no revisions', async () => {
+    const h = setup(async () => 'committed');
+    await h.events.toggle();
+    assert.ok(h.instance.getNavigationChanges(h.document).length);
+    const ref = h.instance.getAllRevisions(h.document);
+    h.document.version++;
+    h.events.document({ document: h.document });
+    assert.equal(h.instance.getNavigationChanges(h.document), undefined);
+    assert.equal(h.instance.getChanges(h.document).length, 0);
+    assert.equal(h.instance.getAllRevisions(h.document), undefined);
+    await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /修订已变化/);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.ok(h.instance.getNavigationChanges(h.document).length);
+    await h.events.toggle();
+    assert.equal(h.instance.getNavigationChanges(h.document).length, 0);
+    h.instance.dispose();
+});
+
 test('restores revision mode from folder settings on activation and editor changes', async () => {
     const h = setup(async () => 'committed', { enabled: true });
     assert.equal(h.decorations.gitRevisionMode, true);

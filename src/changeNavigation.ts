@@ -53,6 +53,21 @@ export function getChangePosition(editor: vscode.TextEditor, changes: readonly L
     return { index: index + 1, total: locations.length };
 }
 
+export class ChangePositionTracker {
+    private document?: vscode.TextDocument;
+    private position = { index: 0, total: 0 };
+
+    getPosition(editor: vscode.TextEditor | undefined, changes: readonly LineChange[] | undefined): { index: number; total: number } {
+        if (this.document !== editor?.document) {
+            this.document = editor?.document;
+            this.position = { index: 0, total: 0 };
+        }
+        // Keep only the displayed count while the latest document version is being computed.
+        if (editor && changes) { this.position = getChangePosition(editor, changes); }
+        return this.position;
+    }
+}
+
 export function navigateChanges(editor: vscode.TextEditor, changes: readonly LineChange[], direction: 1 | -1): boolean {
     const lines = Array.from({ length: editor.document.lineCount }, (_, index) => editor.document.lineAt(index).text);
     const locations = getChangeLocations(changes, lines);

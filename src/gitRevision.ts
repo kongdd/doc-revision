@@ -389,6 +389,11 @@ export class GitRevision implements vscode.Disposable {
         return this.enabled && this.current?.document === document && this.current.version === document.version && this.current.staged;
     }
 
+    public getNavigationChanges(document: vscode.TextDocument): readonly LineChange[] | undefined {
+        if (this.enabled && this.current?.document === document && this.current.version !== document.version) { return; }
+        return this.getChanges(document);
+    }
+
     public getChanges(document: vscode.TextDocument): readonly LineChange[] {
         return this.enabled && this.current?.document === document && this.current.version === document.version
             ? this.current.changes : [];
