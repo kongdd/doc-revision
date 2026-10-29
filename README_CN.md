@@ -96,6 +96,19 @@ Code Diff Tracker 是一个 VS Code 扩展，用来记录本地工作区文件�
 
 `diffTracker.nativeQuickDiff` 是独立开关，默认仍为 `false`；选择 Native Review 不会自动启用它。显式启用后可使用 **Code Diff Tracker Review** gutter provider。它的 **Open Native Review Snapshot** 菜单只打开新审阅，不直接应用缺少版本信息的 Quick Diff hunk。非文本和未知资源继续保留在原有 Changes 视图。
 
+### 实时删除文字（Typst / .typ）
+
+开启录制后，普通**可编辑**源文件会显示删除内容的红色删除线（虚拟文字），新增内容仍正常高亮。可处理中文替换和连续删除多行；超长内容会缩略，完整原文可在悬停提示或 Diff 中查看。
+
+```json
+{
+  "diffTracker.showDeletedTextInline": true,
+  "diffTracker.highlightWordChanges": true
+}
+```
+
+关闭 `diffTracker.showDeletedTextInline` 可恢复删除行徽标。虚拟文字既不写入文件，也不能像真实文字一样选中；Tinymist 的 **Typst 排版预览仍只显示实际源文件内容**，不会显示这些编辑器修订装饰。
+
 ## 监控范围与文件类型
 
 从 **Settings → Tools → Manage Monitoring Scope** 或同名命令打开范围管理器。旧 **Edit Watch Ignores** 命令也会打开同一管理器。管理器显示请求范围、有效范围、待处理变更、准备错误和当前监听覆盖。

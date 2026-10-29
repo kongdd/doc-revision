@@ -99,6 +99,12 @@ When stopped, opening Side-by-Side Diff uses a read-only Review Snapshot. Alread
 
 **Recheck Observation Coverage** is available in the Command Palette and Settings → Tools. For an active, ready configured scope, it reinstalls failed observation coverage and performs one bounded comparison against the original review baselines. Pending text/opaque reviews and unknown before-images are preserved. It refuses while recording is stopped, scope changes or recovery are pending, or editors have unsaved changes. Activity, unsupported coverage or resource limits may leave a visible coverage gap; retry after resolving the cause. After withdrawing a saved exclusion with **Restore Effective Scope Configuration**, Recheck also reconciles its paused-observation gaps against the original baselines. Unchanged files stop appearing as Unknown; unknown before-images still require a separate explicit Reset once coverage is verified. It does not accept changes, rebuild the baseline or modify workspace files.
 
+### Live deleted text in editable files (including Typst .typ)
+
+While recording, `diffTracker.showDeletedTextInline` (enabled by default) renders removed words and lines as red strike-through virtual text directly in the editable VS Code source editor. It supports CJK edits and consecutive deleted lines. Long removed text is shortened on screen; hover and Diff still show full text. Disable it to restore deleted-line badges.
+
+Ghost text never changes the saved source. It is **not rendered in Tinymist's Typst preview**, nor can it be selected as normal source characters.
+
 ## Monitoring Scope and File Types
 
 Open **Settings → Tools → Manage Monitoring Scope**, or run **Code Diff Tracker: Manage Monitoring Scope**. The old **Edit Watch Ignores** command opens this same manager. It shows the requested scope, effective scope, pending changes, preparation errors and current observation coverage.

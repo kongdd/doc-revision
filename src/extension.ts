@@ -1393,6 +1393,15 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     };
 
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration('diffTracker.showDeletedTextInline') ||
+            event.affectsConfiguration('diffTracker.showDeletedLinesBadge') ||
+            event.affectsConfiguration('diffTracker.highlightWordChanges') ||
+            event.affectsConfiguration('diffTracker.highlightModifiedLines')) {
+            updateVisibleDecorations();
+        }
+    }));
+
     // Update decorations when changes are tracked
     context.subscriptions.push(
         diffTracker.onDidTrackChanges((event: TrackChangesEvent) => {

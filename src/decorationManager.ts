@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as Diff from 'diff';
 import { DiffTracker } from './diffTracker';
 import { toTrackedFilePath } from './utils/inlineDiffUri';
+import { collectDeletedLineGhosts, diffModifiedLine, shortenDeletedText } from './utils/liveDeletedText';
 
 export class DecorationManager {
     private addedDecorationType: vscode.TextEditorDecorationType;
@@ -10,6 +11,7 @@ export class DecorationManager {
     private deletedBadgeDecorationType: vscode.TextEditorDecorationType;
     private wordAddedDecorationType: vscode.TextEditorDecorationType;
     private wordRemovedDecorationType: vscode.TextEditorDecorationType;
+    private deletedTextInlineDecorationType: vscode.TextEditorDecorationType;
 
     constructor(private diffTracker: DiffTracker) {
         // Green background for added lines (lighter shade)
@@ -48,6 +50,20 @@ export class DecorationManager {
                 backgroundColor: 'rgba(248, 81, 73, 0.18)',
                 fontStyle: 'italic',
                 textDecoration: 'none; margin-left: 12px; padding: 0 6px; border-radius: 3px;'
+            }
+        });
+
+        // Render red strike-through virtual text without changing the real file.
+        this.deletedTextInlineDecorationType = vscode.window.createTextEditorDecorationType({
+            before: {
+                color: '#f85149',
+                fontStyle: 'italic',
+                textDecoration: 'line-through; margin-right: 4px;'
+            },
+            after: {
+                color: '#f85149',
+                fontStyle: 'italic',
+                textDecoration: 'line-through; margin-left: 4px;'
             }
         });
 
@@ -108,6 +124,7 @@ export class DecorationManager {
         // Read settings
         const config = vscode.workspace.getConfiguration('diffTracker');
         const showDeletedBadge = config.get<boolean>('showDeletedLinesBadge', true);
+        const showDeletedTextInline = config.get<boolean>('showDeletedTextInline', true);
         const highlightAdded = config.get<boolean>('highlightAddedLines', true);
         const highlightModified = config.get<boolean>('highlightModifiedLines', true);
         const highlightWordChanges = config.get<boolean>('highlightWordChanges', true);
@@ -116,79 +133,27 @@ export class DecorationManager {
         const modifiedRanges: vscode.Range[] = [];
         const deletedBadgeRanges: vscode.DecorationOptions[] = [];
 
-        // Build a mapping from originalLineNumber to currentLineNumber for non-deleted lines
-        const origToCurrentMap = new Map<number, number>();
-        let maxOriginalLine = 0;
-
-        lineChanges.forEach(change => {
-            if (change.type !== 'deleted' && change.originalLineNumber !== undefined) {
-                origToCurrentMap.set(change.originalLineNumber, change.lineNumber);
-                maxOriginalLine = Math.max(maxOriginalLine, change.originalLineNumber);
-            }
-        });
-
-        // Group consecutive deleted lines by their originalLineNumber
-        const deletedGroups: Array<{ originalLines: number[]; }> = [];
-        let currentGroup: number[] = [];
-
-        const deletedChanges = lineChanges.filter(c => c.type === 'deleted');
-        deletedChanges.sort((a, b) => (a.originalLineNumber || 0) - (b.originalLineNumber || 0));
-
-        deletedChanges.forEach(change => {
-            const origLine = change.originalLineNumber || 0;
-            if (currentGroup.length === 0) {
-                currentGroup.push(origLine);
-            } else {
-                const lastLine = currentGroup[currentGroup.length - 1];
-                if (origLine === lastLine + 1) {
-                    // Consecutive
-                    currentGroup.push(origLine);
-                } else {
-                    // Start new group
-                    deletedGroups.push({ originalLines: currentGroup });
-                    currentGroup = [origLine];
-                }
-            }
-        });
-        if (currentGroup.length > 0) {
-            deletedGroups.push({ originalLines: currentGroup });
-        }
-
-        // For each deleted group, find the anchor line in current document
-        deletedGroups.forEach(group => {
-            const firstDeletedOrigLine = group.originalLines[0];
-            const count = group.originalLines.length;
-
-            // Find the closest preceding line that exists in current document
-            let anchorCurrentLine = 0;
-            for (let searchOrig = firstDeletedOrigLine - 1; searchOrig >= 1; searchOrig--) {
-                if (origToCurrentMap.has(searchOrig)) {
-                    anchorCurrentLine = origToCurrentMap.get(searchOrig)!;
-                    break;
-                }
-            }
-
-            // If no preceding line found (deletion at start), anchor to line 1
-            if (anchorCurrentLine === 0 && editor.document.lineCount > 0) {
-                anchorCurrentLine = 1;
-            }
-
-            // Ensure anchor is within bounds
-            if (anchorCurrentLine > 0 && anchorCurrentLine <= editor.document.lineCount) {
-                const lineIndex = anchorCurrentLine - 1;
-                const line = editor.document.lineAt(lineIndex);
-                const label = count === 1 ? '- 1 line deleted' : `- ${count} lines deleted`;
-
-                deletedBadgeRanges.push({
-                    range: new vscode.Range(line.range.end, line.range.end),
-                    renderOptions: {
-                        after: {
-                            contentText: label
-                        }
-                    }
+        const deletedTextRanges: vscode.DecorationOptions[] = [];
+        for (const group of collectDeletedLineGhosts(lineChanges)) {
+            if (editor.document.lineCount === 0) { continue; }
+            const atStart = group.anchorLine === 0;
+            const lineIndex = atStart ? 0 : Math.min(group.anchorLine - 1, editor.document.lineCount - 1);
+            const anchorLine = editor.document.lineAt(lineIndex);
+            const position = atStart ? anchorLine.range.start : anchorLine.range.end;
+            const range = new vscode.Range(position, position);
+            if (showDeletedTextInline) {
+                const contentText = atStart ? `⟦${group.text}⟧ ` : ` ⟦${group.text}⟧`;
+                deletedTextRanges.push({
+                    range,
+                    renderOptions: atStart
+                        ? { before: { contentText } }
+                        : { after: { contentText } }
                 });
+            } else if (showDeletedBadge) {
+                const label = group.lineCount === 1 ? '- 1 line deleted' : `- ${group.lineCount} lines deleted`;
+                deletedBadgeRanges.push({ range, renderOptions: { after: { contentText: label } } });
             }
-        });
+        }
 
         const wordAddedRanges: vscode.Range[] = [];
 
@@ -210,24 +175,26 @@ export class DecorationManager {
                 case 'modified':
                     if (highlightModified) {
                         modifiedRanges.push(range);
-
-                        // Add word-level highlighting for modified lines
-                        if (highlightWordChanges && change.oldText !== undefined && change.newText !== undefined) {
-                            const wordDiff = Diff.diffWordsWithSpace(change.oldText, change.newText);
-                            let col = 0;
-
-                            for (const part of wordDiff) {
-                                const len = part.value.length;
-                                if (part.added) {
-                                    // Highlight added words in current line
-                                    wordAddedRanges.push(new vscode.Range(line, col, line, col + len));
-                                    col += len;
-                                } else if (part.removed) {
-                                    // Removed words don't appear in current line, skip
-                                } else {
-                                    // Unchanged text
-                                    col += len;
-                                }
+                    }
+                    if ((highlightWordChanges || showDeletedTextInline) &&
+                        change.oldText !== undefined && change.newText !== undefined) {
+                        const wordDiff = diffModifiedLine(change.oldText, change.newText);
+                        if (highlightWordChanges) {
+                            for (const part of wordDiff.added) {
+                                wordAddedRanges.push(new vscode.Range(line, part.start, line, part.end));
+                            }
+                        }
+                        if (showDeletedTextInline) {
+                            for (const part of wordDiff.removed) {
+                                // Zero-length range inserts visual-only ghost text at the
+                                // correct current-document character offset.
+                                const position = new vscode.Position(line, part.column);
+                                deletedTextRanges.push({
+                                    range: new vscode.Range(position, position),
+                                    renderOptions: {
+                                        after: { contentText: `⟦${shortenDeletedText(part.text, 160)}⟧` }
+                                    }
+                                });
                             }
                         }
                     }
@@ -240,6 +207,7 @@ export class DecorationManager {
         editor.setDecorations(this.deletedDecorationType, []);
         editor.setDecorations(this.deletedBadgeDecorationType, showDeletedBadge ? deletedBadgeRanges : []);
         editor.setDecorations(this.wordAddedDecorationType, wordAddedRanges);
+        editor.setDecorations(this.deletedTextInlineDecorationType, deletedTextRanges);
 
     }
 
@@ -250,6 +218,7 @@ export class DecorationManager {
         editor.setDecorations(this.deletedBadgeDecorationType, []);
         editor.setDecorations(this.wordAddedDecorationType, []);
         editor.setDecorations(this.wordRemovedDecorationType, []);
+        editor.setDecorations(this.deletedTextInlineDecorationType, []);
     }
 
     public clearAllDecorations() {
@@ -265,6 +234,7 @@ export class DecorationManager {
         this.deletedBadgeDecorationType.dispose();
         this.wordAddedDecorationType.dispose();
         this.wordRemovedDecorationType.dispose();
+        this.deletedTextInlineDecorationType.dispose();
     }
 
     private updateInlineDecorations(editor: vscode.TextEditor) {
@@ -386,6 +356,7 @@ export class DecorationManager {
         editor.setDecorations(this.modifiedDecorationType, []);
         editor.setDecorations(this.wordAddedDecorationType, wordAddedRanges);
         editor.setDecorations(this.wordRemovedDecorationType, wordRemovedRanges);
+        editor.setDecorations(this.deletedTextInlineDecorationType, []);
     }
 
     private isEditorInDiffView(editor: vscode.TextEditor): boolean {

@@ -77,6 +77,11 @@
           "default": true,
           "description": "Show a badge indicating deleted lines"
         },
+        "diffTracker.showDeletedTextInline": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render removed text as red strike-through ghost text inside editable editors (including .typ). Does not modify source files or Typst preview."
+        },
         "diffTracker.showCodeLens": {
           "type": "boolean",
           "default": true,
@@ -820,7 +825,8 @@
     "test:monitoring-scope": "node test/monitoring-scope.mjs",
     "test:stage2-probes": "node test/known-p0.mjs",
     "test:legacy-manual-policy": "node test/legacy-manual-policy.mjs",
-    "test": "npm run test:webview-anchors && npm run test:similarity-pairing && npm run test:paths && npm run test:monitoring-scope && npm run test:tracker-safety && npm run test:review-ui && npm run test:git-context && npm run test:git-repositories && npm run test:host-fixture"
+    "test": "npm run test:live-deleted-text && npm run test:webview-anchors && npm run test:similarity-pairing && npm run test:paths && npm run test:monitoring-scope && npm run test:tracker-safety && npm run test:review-ui && npm run test:git-context && npm run test:git-repositories && npm run test:host-fixture",
+    "test:live-deleted-text": "node test/live-deleted-text.mjs"
   },
   "devDependencies": {
     "@pierre/diffs": "1.0.10",
