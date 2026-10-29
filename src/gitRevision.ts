@@ -4,7 +4,7 @@ import { spawn } from 'child_process';
 import * as Diff from 'diff';
 import { getInlineRevisions } from './utils/liveDeletedText';
 import { DecorationManager } from './decorationManager';
-import { DiffTracker, LineChange } from './diffTracker';
+import { getLineChanges, LineChange } from './lineChanges';
 
 interface Repository {
     rootUri: vscode.Uri;
@@ -63,13 +63,12 @@ export class GitRevision implements vscode.Disposable {
     private timer?: ReturnType<typeof setTimeout>;
     private repositoryListener?: vscode.Disposable;
     private repository?: Repository;
-    private baseline?: { key: string; content: string };
     private current?: { document: vscode.TextDocument; version: number; changes: LineChange[]; original: string;
         request: number; repository: Repository; commit: string; file: string; gitPath: string };
     private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     private readonly subscriptions: vscode.Disposable[];
 
-    constructor(private tracker: DiffTracker, private decorations: DecorationManager, private refreshCodeLens: () => void = () => {}) {
+    constructor(private decorations: DecorationManager, private onChange: () => void = () => {}) {
         this.status.command = 'diffTracker.toggleGitRevisions';
         this.status.text = '$(git-compare) Git Revisions: Off';
         this.status.tooltip = 'Click to show unstaged Git changes.';
@@ -77,7 +76,6 @@ export class GitRevision implements vscode.Disposable {
         this.subscriptions = [
             vscode.commands.registerCommand('diffTracker.toggleGitRevisions', () => this.toggle()),
             vscode.window.onDidChangeActiveTextEditor(() => this.refresh()),
-            tracker.onDidTrackChanges(() => this.schedule()),
             vscode.workspace.onDidChangeConfiguration(event => {
                 if (event.affectsConfiguration('diffTracker')) { this.schedule(); }
             }),
@@ -91,7 +89,7 @@ export class GitRevision implements vscode.Disposable {
         this.enabled = !this.enabled;
         this.decorations.gitRevisionMode = this.enabled;
         void vscode.commands.executeCommand('setContext', 'diffTracker.gitRevisions', this.enabled);
-        this.refreshCodeLens();
+        this.onChange();
         this.status.text = `$(git-compare) Git Revisions: ${this.enabled ? 'On' : 'Off'}`;
         this.status.tooltip = this.enabled ? 'Click to hide Git revisions.' : 'Click to show unstaged Git changes.';
         if (this.enabled) {
@@ -101,10 +99,8 @@ export class GitRevision implements vscode.Disposable {
             this.repositoryListener?.dispose();
             this.repositoryListener = undefined;
             this.repository = undefined;
-            this.baseline = undefined;
             this.current = undefined;
             this.decorations.clearAllDecorations();
-            vscode.window.visibleTextEditors.forEach(editor => this.decorations.updateDecorations(editor));
         }
     }
 
@@ -135,21 +131,16 @@ export class GitRevision implements vscode.Disposable {
             if (repository !== this.repository) {
                 this.repositoryListener?.dispose();
                 this.repository = repository;
-                this.repositoryListener = repository.state.onDidChange(() => {
-                    this.baseline = undefined;
-                    this.schedule();
-                });
+                this.repositoryListener = repository.state.onDidChange(() => this.schedule());
             }
             const file = path.relative(repository.rootUri.fsPath, editor.document.uri.fsPath).split(path.sep).join('/');
-            const key = `${commit}\0${editor.document.uri.toString()}`;
             // Compare against the index so staged revisions are no longer pending.
             const original = await repository.show('', file);
             if (!this.enabled || request !== this.request || editor !== vscode.window.activeTextEditor || version !== editor.document.version) { return; }
             if (original.length > 1024 * 1024 || editor.document.getText().length > 1024 * 1024) {
                 throw new Error('Git revisions are limited to files of 1 MiB.');
             }
-            this.baseline = { key, content: original };
-            const changes = this.tracker.buildDiffViewFromContents(original, editor.document.getText()).lineChanges;
+            const changes = getLineChanges(original, editor.document.getText());
             this.current = { document: editor.document, version, changes, original, request, repository, commit, file, gitPath: api.git.path };
             this.status.tooltip = 'Showing unstaged changes against the Git index. Click to hide.';
             this.decorations.renderLineChanges(editor, changes);

@@ -1,10 +1,10 @@
 {
   "name": "code-diff-tracker",
   "displayName": "Code Diff Tracker",
-  "description": "Review, keep, and safely revert workspace file changes in real time",
+  "description": "Review unstaged Git changes in a Word-style revision mode",
   "version": "0.8.11",
   "publisher": "lengmh",
-  "author": "TinyTigerPan (Fork from Wizyoung)",
+  "author": "TinyTigerPan",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
   "repository": {
@@ -41,11 +41,7 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:diffTracker.changesView",
-    "onView:diffTracker.settingsView",
-    "onCommand:diffTracker.toggleRecording",
-    "onCommand:diffTracker.startRecording",
-    "onCommand:diffTracker.stopRecording"
+    "onView:diffTracker.changesView"
   ],
   "contributes": {
     "viewsContainers": {
@@ -62,11 +58,6 @@
         {
           "id": "diffTracker.changesView",
           "name": "修订"
-        },
-        {
-          "id": "diffTracker.settingsView",
-          "name": "高级设置",
-          "visibility": "collapsed"
         }
       ]
     },
@@ -83,11 +74,6 @@
           "default": true,
           "description": "Render removed text as red strike-through ghost text inside editable editors (including .typ). Does not modify source files or Typst preview."
         },
-        "diffTracker.showCodeLens": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show CodeLens actions (Revert/Keep) above change blocks"
-        },
         "diffTracker.highlightAddedLines": {
           "type": "boolean",
           "default": true,
@@ -96,185 +82,12 @@
         "diffTracker.highlightModifiedLines": {
           "type": "boolean",
           "default": false,
-          "description": "Highlight modified lines with blue background"
+          "description": "Highlight modified lines with a background color"
         },
         "diffTracker.highlightWordChanges": {
           "type": "boolean",
           "default": true,
           "description": "Highlight word-level changes within modified lines"
-        },
-        "diffTracker.defaultOpenMode": {
-          "type": "string",
-          "default": "webview",
-          "enum": [
-            "webview",
-            "inline",
-            "sideBySide",
-            "original",
-            "splitOriginalWebview",
-            "nativeReview"
-          ],
-          "enumDescriptions": [
-            "Open interactive webview diff panel",
-            "Open inline diff editor (read-only)",
-            "Open VS Code side-by-side diff editor",
-            "Open original file directly",
-            "Open split view: left original file, right webview diff panel",
-            "Open version-bound Native Review snapshots for text; use the webview for read-only or unknown resources"
-          ],
-          "description": "Default open mode when clicking a changed file in Code Diff Tracker"
-        },
-        "diffTracker.openWebviewBeside": {
-          "type": "boolean",
-          "default": false,
-          "description": "When opening Webview diff, place it in a side editor group instead of the current one"
-        },
-        "diffTracker.webviewDiffStyle": {
-          "type": "string",
-          "enum": [
-            "split",
-            "unified"
-          ],
-          "default": "split",
-          "scope": "window",
-          "enumDescriptions": [
-            "Show original and current lines side by side.",
-            "Show original and current lines in one column."
-          ],
-          "description": "Initial layout for a new WebView diff panel. Toolbar changes stay in that panel; close and reopen it to apply a changed default."
-        },
-        "diffTracker.webviewWordWrap": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Wrap long lines in a new WebView diff panel. Toolbar changes stay in that panel; close and reopen it to apply a changed default."
-        },
-        "diffTracker.webviewExpandUnchanged": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Show all unchanged context lines in a new WebView diff panel (the Expand toolbar control). Toolbar changes stay in that panel; close and reopen it to apply a changed default."
-        },
-        "diffTracker.watchExclude": {
-          "type": "array",
-          "default": [],
-          "scope": "window",
-          "items": {
-            "oneOf": [
-              {
-                "type": "string",
-                "description": "Legacy Global watch-ignore entry retained for migration compatibility."
-              },
-              {
-                "type": "object",
-                "required": [
-                  "scope",
-                  "pattern"
-                ],
-                "additionalProperties": false,
-                "properties": {
-                  "scope": {
-                    "type": "string",
-                    "enum": [
-                      "all",
-                      "folder"
-                    ]
-                  },
-                  "folder": {
-                    "type": "string"
-                  },
-                  "pattern": {
-                    "type": "string"
-                  }
-                }
-              }
-            ]
-          },
-          "description": "Requested explicit exclusions for this workspace. Structured entries use restricted gitignore-style patterns without ! negation. Legacy Global string entries remain protected until migration."
-        },
-        "diffTracker.onlyTrackVSCodeChanges": {
-          "type": "boolean",
-          "default": false,
-          "deprecationMessage": "Deprecated. Use diffTracker.onlyTrackAutomatedChanges instead.",
-          "description": "Deprecated alias for automation-only tracking."
-        },
-        "diffTracker.onlyTrackAutomatedChanges": {
-          "type": "boolean",
-          "default": false,
-          "description": "Track external and tagged automation changes. Editor changes without reliable source information remain visible for review; saving does not automatically accept them."
-        },
-        "diffTracker.monitoringScope": {
-          "type": "string",
-          "enum": [
-            "rules",
-            "wholeWorkspace"
-          ],
-          "default": "rules",
-          "scope": "window",
-          "enumDescriptions": [
-            "Use ordinary ignore policy, with explicit DiffTracker includes/excludes applied by the monitoring-scope manager.",
-            "Request monitoring of all monitorable workspace resources except explicit DiffTracker exclusions."
-          ],
-          "description": "Requested monitoring scope for this workspace. Scope expansion requires local confirmation before it becomes effective."
-        },
-        "diffTracker.watchInclude": {
-          "type": "array",
-          "default": [],
-          "scope": "window",
-          "items": {
-            "type": "object",
-            "required": [
-              "scope",
-              "path"
-            ],
-            "additionalProperties": false,
-            "properties": {
-              "scope": {
-                "type": "string",
-                "enum": [
-                  "all",
-                  "folder"
-                ]
-              },
-              "folder": {
-                "type": "string"
-              },
-              "path": {
-                "type": "string"
-              }
-            }
-          },
-          "description": "Requested explicit workspace-relative paths to include. Folder-scoped entries require a unique workspace folder name."
-        },
-        "diffTracker.nativeQuickDiff": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Opt in to the Code Diff Tracker Quick Diff provider. Its menu opens a read-only, version-bound Native Review snapshot; it does not apply unversioned Quick Diff hunks."
-        },
-        "diffTracker.promptOnGitBranchChange": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "While recording, prompt to archive and rebuild after a Git context change. Never archives automatically or prompts while stopped."
-        },
-        "diffTracker.autoStartRecording": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Start recording in a new workspace with no saved session. Saved stopped sessions remain stopped; active sessions resume normally."
-        },
-        "diffTracker.onlyRecordReviewableText": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Record only safely reviewable text for new resources. Existing reviews and Undo are preserved. Previously skipped content requires an explicit new baseline before text review."
-        },
-        "diffTracker.autoOpenNextPendingFile": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "After a successful single-file review resolves all pending changes in that file, open the next pending file unless you switched editors. Batch actions do not navigate."
         }
       }
     },
@@ -295,593 +108,37 @@
         "command": "diffTracker.toggleGitRevisions",
         "title": "Toggle Git Revisions for Current File",
         "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.toggleRecording",
-        "title": "Toggle Recording",
-        "category": "Code Diff Tracker",
-        "icon": "$(record)"
-      },
-      {
-        "command": "diffTracker.startRecording",
-        "title": "Start Recording",
-        "category": "Code Diff Tracker",
-        "icon": "$(record)"
-      },
-      {
-        "command": "diffTracker.stopRecording",
-        "title": "Stop Recording",
-        "category": "Code Diff Tracker",
-        "icon": "$(debug-stop)"
-      },
-      {
-        "command": "diffTracker.showDiffs",
-        "title": "Show Diffs",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.clearDiffs",
-        "title": "Clear Diffs",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.revertAllChanges",
-        "title": "Revert Text Changes",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.keepAllChanges",
-        "title": "Accept / Acknowledge All Changes",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.undoLastRevert",
-        "title": "Undo Last Revert",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.rebuildGitBaseline",
-        "title": "Archive and Rebuild Paused Git Baseline",
-        "category": "Code Diff Tracker",
-        "icon": "$(repo-pull)"
-      },
-      {
-        "command": "diffTracker.restoreArchivedGitReview",
-        "title": "Restore Archived Git Review",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.acknowledgeOpaqueChange",
-        "title": "Acknowledge Read-only Change",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.acknowledgeLargeFileReminder",
-        "title": "Acknowledge Large-file Reminder",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.acceptFile",
-        "title": "Accept File Changes",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.acceptFolderText",
-        "title": "Accept Text Changes in Folder",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.revertFolderText",
-        "title": "Revert Text Changes in Folder",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.acknowledgeFolderOpaque",
-        "title": "Acknowledge Read-only Changes in Folder",
-        "category": "Code Diff Tracker",
-        "icon": "$(check-all)"
-      },
-      {
-        "command": "diffTracker.resetUnknownBaseline",
-        "title": "Reset Unknown Baseline (Current Disk State)",
-        "category": "Code Diff Tracker",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "diffTracker.resetAllUnknownBaselines",
-        "title": "Reset All Unknown Baselines (Current Disk State)",
-        "category": "Code Diff Tracker",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "diffTracker.revertFile",
-        "title": "Revert File",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.showInlineDiff",
-        "title": "Show Inline Diff",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.showSideBySideDiff",
-        "title": "Show Side-by-Side Diff",
-        "category": "Code Diff Tracker",
-        "icon": "$(split-horizontal)"
-      },
-      {
-        "command": "diffTracker.showSideBySideDiffActive",
-        "title": "Show Side-by-Side Diff (Active)",
-        "category": "Code Diff Tracker",
-        "icon": {
-          "dark": "resources/diff-sbs-dark.svg",
-          "light": "resources/diff-sbs-light.svg"
-        }
-      },
-      {
-        "command": "diffTracker.showInlineDiffActive",
-        "title": "Show Inline Diff (Active)",
-        "category": "Code Diff Tracker",
-        "icon": {
-          "dark": "resources/diff-inline-dark.svg",
-          "light": "resources/diff-inline-light.svg"
-        }
-      },
-      {
-        "command": "diffTracker.revertBlock",
-        "title": "Revert Block",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.keepBlock",
-        "title": "Keep Block",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.goToBlock",
-        "title": "Go to Block",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.openOriginalFile",
-        "title": "Open Original File",
-        "category": "Code Diff Tracker",
-        "icon": "$(go-to-file)"
-      },
-      {
-        "command": "diffTracker.openDiffDefault",
-        "title": "Open with Code Diff Tracker",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.revertAllBlocksInFile",
-        "title": "Revert All Changes in File",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.keepAllBlocksInFile",
-        "title": "Keep All Changes in File",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.showWebviewDiff",
-        "title": "Show Webview Diff",
-        "category": "Code Diff Tracker",
-        "icon": "$(preview)"
-      },
-      {
-        "command": "diffTracker.showWebviewDiffActive",
-        "title": "Show Webview Diff (Active)",
-        "category": "Code Diff Tracker",
-        "icon": "$(preview)"
-      },
-      {
-        "command": "diffTracker.showOriginalAndWebviewSplit",
-        "title": "Show Split: Original | Webview",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.selectDefaultOpenMode",
-        "title": "Select Default Open Mode",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.selectWebviewDiffStyle",
-        "title": "Select Default WebView Diff Layout",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.excludeCoverageSubtree",
-        "title": "Add This Subtree to Explicit Excludes",
-        "category": "Code Diff Tracker",
-        "icon": "$(eye-closed)"
-      },
-      {
-        "command": "diffTracker.manageMonitoringScope",
-        "title": "Manage Monitoring Scope",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.applyPendingScope",
-        "title": "Apply Pending Scope",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.retryScopePreparation",
-        "title": "Retry Scope Preparation",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.recheckObservationCoverage",
-        "title": "Recheck Observation Coverage",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.migrateLegacyWatchRules",
-        "title": "Migrate Legacy Watch Rules",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.restoreEffectiveScopeConfiguration",
-        "title": "Restore Effective Scope Configuration",
-        "category": "Code Diff Tracker"
-      },
-      {
-        "command": "diffTracker.nativeReview.openFile",
-        "title": "Open Native Review Snapshot",
-        "category": "Code Diff Tracker",
-        "icon": "$(open-preview)"
-      },
-      {
-        "command": "diffTracker.nativeReview.openChanges",
-        "title": "Review Text Changes Natively",
-        "category": "Code Diff Tracker",
-        "icon": "$(diff-multiple)"
-      },
-      {
-        "command": "diffTracker.nativeReview.openFromQuickDiff",
-        "title": "Open Native Review Snapshot",
-        "category": "Code Diff Tracker",
-        "icon": "$(open-preview)"
-      },
-      {
-        "command": "diffTracker.nativeReview.keepFile",
-        "title": "Keep Reviewed File",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.nativeReview.revertFile",
-        "title": "Revert Reviewed File",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.nativeReview.keepSelectedBlock",
-        "title": "Keep Selected Whole Block",
-        "category": "Code Diff Tracker",
-        "icon": "$(check)"
-      },
-      {
-        "command": "diffTracker.nativeReview.revertSelectedBlock",
-        "title": "Revert Selected Whole Block",
-        "category": "Code Diff Tracker",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "diffTracker.excludeResource",
-        "title": "Stop Recording This File or Folder",
-        "category": "Code Diff Tracker"
       }
     ],
-    "menus": {
-      "view/item/context": [
-        {
-          "command": "diffTracker.excludeCoverageSubtree",
-          "when": "view == diffTracker.changesView && viewItem == coverageDiagnosticSubtree",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.excludeCoverageSubtree",
-          "when": "view == diffTracker.changesView && viewItem == coverageDiagnosticSubtree",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "diffTracker.acceptFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.acceptFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "diffTracker.openOriginalFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "2_review@1"
-        },
-        {
-          "command": "diffTracker.showSideBySideDiff",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "2_review@2"
-        },
-        {
-          "command": "diffTracker.revertFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.revertFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "1_actions@2"
-        },
-        {
-          "command": "diffTracker.showWebviewDiff",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "2_review@4"
-        },
-        {
-          "command": "diffTracker.acknowledgeOpaqueChange",
-          "when": "view == diffTracker.changesView && viewItem == opaqueFile",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.acknowledgeOpaqueChange",
-          "when": "view == diffTracker.changesView && viewItem == opaqueFile",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "diffTracker.showWebviewDiff",
-          "when": "view == diffTracker.changesView && viewItem == opaqueFile",
-          "group": "2_review@1"
-        },
-        {
-          "command": "diffTracker.acknowledgeLargeFileReminder",
-          "when": "view == diffTracker.changesView && viewItem == largeFileReminder",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.acknowledgeLargeFileReminder",
-          "when": "view == diffTracker.changesView && viewItem == largeFileReminder",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "diffTracker.showWebviewDiff",
-          "when": "view == diffTracker.changesView && (viewItem == largeFileReminder || viewItem == retainedLargeFileReview)",
-          "group": "2_review@1"
-        },
-        {
-          "command": "diffTracker.resetUnknownBaseline",
-          "when": "view == diffTracker.changesView && viewItem == unknownFile",
-          "group": "inline"
-        },
-        {
-          "command": "diffTracker.resetUnknownBaseline",
-          "when": "view == diffTracker.changesView && viewItem == unknownFile",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "diffTracker.showWebviewDiff",
-          "when": "view == diffTracker.changesView && viewItem == unknownFile",
-          "group": "2_review@1"
-        },
-        {
-          "command": "diffTracker.acceptFolderText",
-          "when": "view == diffTracker.changesView && viewItem == reviewFolder",
-          "group": "2_review@1"
-        },
-        {
-          "command": "diffTracker.revertFolderText",
-          "when": "view == diffTracker.changesView && viewItem == reviewFolder",
-          "group": "2_review@2"
-        },
-        {
-          "command": "diffTracker.acknowledgeFolderOpaque",
-          "when": "view == diffTracker.changesView && viewItem == reviewFolder",
-          "group": "2_review@3"
-        },
-        {
-          "command": "diffTracker.nativeReview.openFile",
-          "when": "view == diffTracker.changesView && viewItem == changedFile",
-          "group": "2_review@3"
-        },
-        {
-          "command": "diffTracker.excludeResource",
-          "when": "view == diffTracker.changesView && viewItem =~ /^(changedFile|opaqueFile|unknownFile|largeFileReminder|retainedLargeFileReview|reviewFolder)$/",
-          "group": "3_scope@1"
-        }
-      ],
-      "explorer/context": [
-        {
-          "command": "diffTracker.openDiffDefault",
-          "when": "resourceScheme == file && diffTracker.isRecording",
-          "group": "2_main@1"
-        },
-        {
-          "command": "diffTracker.excludeResource",
-          "when": "resourceScheme == file",
-          "group": "2_main@2"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "diffTracker.startRecording",
-          "when": "view == diffTracker.changesView && !diffTracker.isRecording",
-          "group": "advanced@1"
-        },
-        {
-          "command": "diffTracker.stopRecording",
-          "when": "view == diffTracker.changesView && diffTracker.isRecording",
-          "group": "advanced@1"
-        },
-        {
-          "command": "diffTracker.clearDiffs",
-          "when": "view == diffTracker.changesView",
-          "group": "advanced@2"
-        },
-        {
-          "command": "diffTracker.undoLastRevert",
-          "when": "view == diffTracker.changesView",
-          "group": "advanced@3"
-        },
-        {
-          "command": "diffTracker.rebuildGitBaseline",
-          "when": "view == diffTracker.changesView",
-          "group": "advanced@4"
-        },
-        {
-          "command": "diffTracker.nativeReview.openChanges",
-          "when": "view == diffTracker.changesView",
-          "group": "review@1"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "diffTracker.previousChange",
-          "when": "resourceScheme == file && (diffTracker.isRecording || diffTracker.gitRevisions)",
-          "group": "navigation@1"
-        },
-        {
-          "command": "diffTracker.nextChange",
-          "when": "resourceScheme == file && (diffTracker.isRecording || diffTracker.gitRevisions)",
-          "group": "navigation@2"
-        },
-        {
-          "command": "diffTracker.showSideBySideDiffActive",
-          "when": "resourceScheme == file && diffTracker.isRecording",
-          "group": "navigation"
-        },
-        {
-          "command": "diffTracker.showInlineDiffActive",
-          "when": "resourceScheme == file && diffTracker.isRecording",
-          "group": "navigation"
-        },
-        {
-          "command": "diffTracker.showWebviewDiffActive",
-          "when": "resourceScheme == file && diffTracker.isRecording",
-          "group": "navigation"
-        }
-      ],
-      "scm/change/title": [
-        {
-          "command": "diffTracker.nativeReview.openFromQuickDiff",
-          "when": "config.diffTracker.nativeQuickDiff && originalResourceScheme == diff-tracker-original",
-          "group": "navigation"
-        }
-      ],
-      "editor/context": [
-        {
-          "command": "diffTracker.nativeReview.keepSelectedBlock",
-          "when": "diffTracker.nativeReviewContext",
-          "group": "diffTracker@1"
-        },
-        {
-          "command": "diffTracker.nativeReview.revertSelectedBlock",
-          "when": "diffTracker.nativeReviewContext",
-          "group": "diffTracker@2"
-        },
-        {
-          "command": "diffTracker.nativeReview.keepFile",
-          "when": "diffTracker.nativeReviewContext",
-          "group": "diffTracker@3"
-        },
-        {
-          "command": "diffTracker.nativeReview.revertFile",
-          "when": "diffTracker.nativeReviewContext",
-          "group": "diffTracker@4"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "diffTracker.nativeReview.openFromQuickDiff",
-          "when": "false"
-        },
-        {
-          "command": "diffTracker.nativeReview.keepSelectedBlock",
-          "when": "false"
-        },
-        {
-          "command": "diffTracker.nativeReview.revertSelectedBlock",
-          "when": "false"
-        },
-        {
-          "command": "diffTracker.nativeReview.keepFile",
-          "when": "false"
-        },
-        {
-          "command": "diffTracker.nativeReview.revertFile",
-          "when": "false"
-        }
-      ]
-    },
+    "menus": {},
     "keybindings": [
       {
         "command": "diffTracker.toggleGitRevisions",
         "key": "shift+alt+g",
         "mac": "shift+option+g",
         "when": "editorTextFocus && resourceScheme == file"
-      },
-      {
-        "command": "diffTracker.toggleRecording",
-        "key": "shift+alt+d",
-        "mac": "shift+option+d"
       }
     ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && npm run build:webview",
-    "build:webview": "node esbuild.webview.js",
+    "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test:webview-anchors": "node test/webview-annotation-mapping.mjs",
-    "test:similarity-pairing": "node test/similarity-pairing.mjs",
+    "test": "node --test test/change-navigation.mjs test/git-revisions.mjs test/revision-hover.mjs test/simple-sidebar.mjs test/line-changes.mjs && node test/live-deleted-text.mjs",
     "lint": "eslint src",
-    "package": "vsce package",
-    "test:paths": "node test/path-display.mjs",
-    "test:tracker-safety": "node test/tracker-safety.mjs",
-    "test:review-ui": "node test/review-ui.mjs && node test/branch-keep-ui.mjs",
-    "test:git-context": "node test/git-context.mjs && node test/git-readiness-race.mjs",
-    "test:git-repositories": "node test/git-repository-integration.mjs",
-    "test:host": "node test/host/run.mjs",
-    "test:host-fixture": "node --test test/host-fixture-setup.mjs",
-    "test:performance": "node test/performance.mjs",
-    "test:monitoring-scope": "node test/monitoring-scope.mjs",
-    "test:stage2-probes": "node test/known-p0.mjs",
-    "test:legacy-manual-policy": "node test/legacy-manual-policy.mjs",
-    "test": "npm run test:simple-sidebar && npm run test:revision-hover && npm run test:change-navigation && npm run test:git-revisions && npm run test:inline-revisions && npm run test:live-deleted-text && npm run test:webview-anchors && npm run test:similarity-pairing && npm run test:paths && npm run test:monitoring-scope && npm run test:tracker-safety && npm run test:review-ui && npm run test:git-context && npm run test:git-repositories && npm run test:host-fixture",
-    "test:live-deleted-text": "node test/live-deleted-text.mjs",
-    "test:git-revisions": "node --test test/git-revisions.mjs",
-    "test:inline-revisions": "node --test test/inline-revisions.mjs",
-    "test:change-navigation": "node --test test/change-navigation.mjs",
-    "test:revision-hover": "node --test test/revision-hover.mjs",
-    "test:simple-sidebar": "node --test test/simple-sidebar.mjs"
+    "package": "vsce package"
   },
   "devDependencies": {
-    "@pierre/diffs": "1.0.10",
-    "@types/mocha": "^10.0.10",
     "@types/node": "^20.x",
     "@types/vscode": "1.80.0",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
     "@typescript-eslint/parser": "^8.70.0",
-    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
-    "esbuild": "^0.27.2",
     "eslint": "^10.10.0",
     "typescript": "^5.2.0"
   },
   "dependencies": {
-    "diff": "^8.0.3",
-    "ignore": "^5.3.2"
+    "diff": "^8.0.3"
   }
 }

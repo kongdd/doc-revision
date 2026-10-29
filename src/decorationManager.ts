@@ -1,7 +1,5 @@
 import * as vscode from 'vscode';
-import * as Diff from 'diff';
-import { DiffTracker } from './diffTracker';
-import { toTrackedFilePath } from './utils/inlineDiffUri';
+import { LineChange } from './lineChanges';
 import { collectDeletedLineGhosts, diffModifiedLine, shortenDeletedText } from './utils/liveDeletedText';
 
 export class DecorationManager {
@@ -14,7 +12,7 @@ export class DecorationManager {
     private wordRemovedDecorationType: vscode.TextEditorDecorationType;
     private deletedTextInlineDecorationType: vscode.TextEditorDecorationType;
 
-    constructor(private diffTracker: DiffTracker) {
+    constructor() {
         // Green background for added lines (lighter shade)
         this.addedDecorationType = vscode.window.createTextEditorDecorationType({
             backgroundColor: 'rgba(63, 185, 80, 0.12)',
@@ -92,41 +90,7 @@ export class DecorationManager {
         return vscode.Uri.parse('data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64'));
     }
 
-    public updateDecorations(editor: vscode.TextEditor) {
-        if (this.gitRevisionMode) { return; }
-        // Multi Diff has no stable 1.80 tab-input type to inspect. Snapshot
-        // identity itself excludes live decorations, including stale views.
-        if (editor.document.uri.scheme === 'diff-tracker-review-base' || editor.document.uri.scheme === 'diff-tracker-review-current') {
-            this.clearDecorations(editor);
-            return;
-        }
-        if (!this.diffTracker.getIsRecording()) {
-            this.clearDecorations(editor);
-            return;
-        }
-
-        if (this.isEditorInDiffView(editor)) {
-            this.clearDecorations(editor);
-            return;
-        }
-
-        if (editor.document.uri.scheme === 'diff-tracker-inline') {
-            this.updateInlineDecorations(editor);
-            return;
-        }
-
-        const filePath = editor.document.uri.fsPath;
-        const lineChanges = this.diffTracker.getLineChanges(filePath);
-
-        if (!lineChanges) {
-            this.clearDecorations(editor);
-            return;
-        }
-
-        this.renderLineChanges(editor, lineChanges);
-    }
-
-    public renderLineChanges(editor: vscode.TextEditor, lineChanges: NonNullable<ReturnType<DiffTracker['getLineChanges']>>) {
+    public renderLineChanges(editor: vscode.TextEditor, lineChanges: readonly LineChange[]) {
         // Read settings
         const config = vscode.workspace.getConfiguration('diffTracker');
         const showDeletedBadge = config.get<boolean>('showDeletedLinesBadge', true);
@@ -243,146 +207,4 @@ export class DecorationManager {
         this.deletedTextInlineDecorationType.dispose();
     }
 
-    private updateInlineDecorations(editor: vscode.TextEditor) {
-        const filePath = toTrackedFilePath(editor.document.uri.fsPath);
-
-        let inlineView = this.diffTracker.getInlineView(filePath);
-        if (!inlineView) {
-            const tracked = this.diffTracker.getTrackedChanges().find(change => change.filePath === filePath);
-            if (tracked) {
-                inlineView = this.diffTracker.buildInlineViewFromContents(
-                    tracked.originalContent,
-                    tracked.currentContent
-                );
-            }
-        }
-        if (!inlineView) {
-            this.clearDecorations(editor);
-            return;
-        }
-        const lineTypes = inlineView.lineTypes;
-        const inlineContent = inlineView.content;
-
-        const config = vscode.workspace.getConfiguration('diffTracker');
-        const highlightWordChanges = config.get<boolean>('highlightWordChanges', true);
-
-        const inlineLines = inlineContent.split('\n');
-        const addedRanges: vscode.Range[] = [];
-        const deletedRanges: vscode.Range[] = [];
-        const wordAddedRanges: vscode.Range[] = [];
-        const wordRemovedRanges: vscode.Range[] = [];
-        const lineCount = editor.document.lineCount;
-        const total = Math.min(lineTypes.length, lineCount);
-
-        let i = 0;
-        while (i < total) {
-            const type = lineTypes[i];
-
-            // Check for consecutive deleted lines followed by consecutive added lines
-            if (type === 'deleted') {
-                // Collect all consecutive deleted lines
-                const deletedStart = i;
-                while (i < total && lineTypes[i] === 'deleted') {
-                    i++;
-                }
-                const deletedEnd = i;
-                const deletedCount = deletedEnd - deletedStart;
-
-                // Collect all consecutive added lines that follow
-                const addedStart = i;
-                while (i < total && lineTypes[i] === 'added') {
-                    i++;
-                }
-                const addedEnd = i;
-                const addedCount = addedEnd - addedStart;
-
-                // Pair deleted and added lines by position for word-level diff
-                const pairCount = Math.min(deletedCount, addedCount);
-                for (let j = 0; j < pairCount; j++) {
-                    const deletedLineIdx = deletedStart + j;
-                    const addedLineIdx = addedStart + j;
-                    const oldLine = inlineLines[deletedLineIdx] || '';
-                    const newLine = inlineLines[addedLineIdx] || '';
-
-                    // Add line-level decorations
-                    const deletedLineText = editor.document.lineAt(deletedLineIdx).text;
-                    const addedLineText = editor.document.lineAt(addedLineIdx).text;
-                    deletedRanges.push(new vscode.Range(deletedLineIdx, 0, deletedLineIdx, deletedLineText.length));
-                    addedRanges.push(new vscode.Range(addedLineIdx, 0, addedLineIdx, addedLineText.length));
-
-                    // Compute word-level diff (if enabled)
-                    if (highlightWordChanges) {
-                        const wordDiff = Diff.diffWordsWithSpace(oldLine, newLine);
-
-                        let oldCol = 0;
-                        let newCol = 0;
-
-                        for (const part of wordDiff) {
-                            const len = part.value.length;
-                            if (part.removed) {
-                                wordRemovedRanges.push(new vscode.Range(deletedLineIdx, oldCol, deletedLineIdx, oldCol + len));
-                                oldCol += len;
-                            } else if (part.added) {
-                                wordAddedRanges.push(new vscode.Range(addedLineIdx, newCol, addedLineIdx, newCol + len));
-                                newCol += len;
-                            } else {
-                                oldCol += len;
-                                newCol += len;
-                            }
-                        }
-                    }
-                }
-
-                // Remaining unpaired deleted lines (line-level only)
-                for (let j = pairCount; j < deletedCount; j++) {
-                    const lineIdx = deletedStart + j;
-                    const deletedLineText = editor.document.lineAt(lineIdx).text;
-                    deletedRanges.push(new vscode.Range(lineIdx, 0, lineIdx, deletedLineText.length));
-                }
-
-                // Remaining unpaired added lines (line-level only)
-                for (let j = pairCount; j < addedCount; j++) {
-                    const lineIdx = addedStart + j;
-                    const addedLineText = editor.document.lineAt(lineIdx).text;
-                    addedRanges.push(new vscode.Range(lineIdx, 0, lineIdx, addedLineText.length));
-                }
-
-                continue;
-            }
-
-            if (type === 'added') {
-                const lineText = editor.document.lineAt(i).text;
-                addedRanges.push(new vscode.Range(i, 0, i, lineText.length));
-            }
-            i++;
-        }
-
-        editor.setDecorations(this.addedDecorationType, addedRanges);
-        editor.setDecorations(this.deletedDecorationType, deletedRanges);
-        editor.setDecorations(this.modifiedDecorationType, []);
-        editor.setDecorations(this.wordAddedDecorationType, wordAddedRanges);
-        editor.setDecorations(this.wordRemovedDecorationType, wordRemovedRanges);
-        editor.setDecorations(this.deletedTextInlineDecorationType, []);
-    }
-
-    private isEditorInDiffView(editor: vscode.TextEditor): boolean {
-        const targetUri = editor.document.uri.toString();
-        for (const group of vscode.window.tabGroups.all) {
-            const activeTab = group.activeTab;
-            if (!activeTab) {
-                continue;
-            }
-
-            const input = activeTab.input;
-            if (!(input instanceof vscode.TabInputTextDiff)) {
-                continue;
-            }
-
-            if (input.original.toString() === targetUri || input.modified.toString() === targetUri) {
-                return true;
-            }
-        }
-
-        return false;
-    }
 }

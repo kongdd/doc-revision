@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { LineChange } from './diffTracker';
+import { LineChange } from './lineChanges';
 import { getInlineRevisions } from './utils/liveDeletedText';
 
 export interface ChangeLocation {

@@ -8,14 +8,8 @@
 !LICENSE
 !out/*.js
 !out/utils/*.js
-!webview/diffs-bundle.js
-!webview/watchExcludePanel.js
 !resources/*.svg
 !resources/*.png
-!node_modules/ignore/*.js
-!node_modules/ignore/package.json
-!node_modules/ignore/LICENSE-MIT
-!node_modules/ignore/README.md
 !node_modules/diff/package.json
 !node_modules/diff/LICENSE
 !node_modules/diff/README.md

@@ -33,27 +33,28 @@ function setup(show, options = {}) {
     };
     const renders = [];
     const decorations = { clearAllDecorations() {}, updateDecorations() {}, renderLineChanges: (_editor, changes) => renders.push(changes) };
-    const tracker = { onDidTrackChanges: listen('tracked'), buildDiffViewFromContents: (before, after) => ({ lineChanges: options.changes ?? [before, after] }) };
     const module = { exports: {} };
     const source = ts.transpileModule(fs.readFileSync('src/gitRevision.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
     vm.runInNewContext(source, { module, exports: module.exports, require: name => {
         if (name === 'vscode') { return vscode; }
         if (name === 'path') { return path; }
         if (name === './utils/liveDeletedText') { return require('../out/utils/liveDeletedText'); }
+        if (name === './lineChanges') { return { getLineChanges: options.changes ? () => options.changes : require('../out/lineChanges').getLineChanges }; }
         return require(name);
     }, setTimeout, clearTimeout });
-    const instance = new module.exports.GitRevision(tracker, decorations);
+    const instance = new module.exports.GitRevision(decorations);
     return { events, document, renders, decorations, status, instance, repository, edits };
 }
 
-test('Git revisions use HEAD and toggle independently of recording', async () => {
+test('Git revisions compare against the index and can be toggled', async () => {
     const calls = [];
     const h = setup(async (...args) => { calls.push(args); return 'committed'; });
     assert.match(h.status.text, /Off/);
     await h.events.toggle();
     assert.match(h.status.text, /On/);
     assert.deepEqual(calls, [['', 'a.txt']]);
-    assert.deepEqual(h.renders[0], ['committed', 'edited']);
+    assert.equal(h.renders[0][0].oldText, 'committed');
+    assert.equal(h.renders[0][0].newText, 'edited');
     assert.equal(h.decorations.gitRevisionMode, true);
     await h.events.toggle();
     assert.equal(h.decorations.gitRevisionMode, false);
@@ -82,6 +83,26 @@ test('accept stages only one inline revision in a real Git index', async () => {
         await assert.rejects(h.instance.applyInlineRevision(ref, 'accept'), /stale/);
         h.instance.dispose();
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('accept stages whole added and deleted blocks in a real Git index', async () => {
+    for (const [original, current] of [['', 'added\n'], ['deleted\n', '']]) {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-revision-block-'));
+        const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+        try {
+            git('init', '-q');
+            fs.writeFileSync(path.join(root, 'a.txt'), original);
+            git('add', 'a.txt');
+            const h = setup(async () => git('show', ':a.txt'), { root, current });
+            await h.events.toggle();
+            const ref = h.instance.getInlineRevision(h.document, { line: 0, character: 0 });
+            assert.ok(ref);
+            await h.instance.applyInlineRevision(ref, 'accept');
+            assert.equal(git('show', ':a.txt'), current);
+            assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), original);
+            h.instance.dispose();
+        } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    }
 });
 
 test('reject restores only the selected text in the editor buffer', async () => {
