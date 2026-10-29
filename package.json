@@ -2,7 +2,7 @@
   "name": "code-diff-tracker",
   "displayName": "Code Diff Tracker",
   "description": "Review unstaged Git changes in a Word-style revision mode",
-  "version": "0.8.11",
+  "version": "0.8.13",
   "publisher": "lengmh",
   "author": "TinyTigerPan",
   "license": "MIT",
@@ -40,7 +40,7 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished",
+    "*",
     "onView:diffTracker.changesView"
   ],
   "contributes": {
@@ -58,12 +58,28 @@
         {
           "id": "diffTracker.changesView",
           "name": "修订"
+        },
+        {
+          "id": "diffTracker.navigationView",
+          "name": "修订导航"
         }
       ]
     },
     "configuration": {
       "title": "Code Diff Tracker",
       "properties": {
+        "diffTracker.showRevisions": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Show Git revisions for the current workspace folder."
+        },
+        "diffTracker.showAllChanges": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Show the net changes against HEAD instead of unstaged changes."
+        },
         "diffTracker.showDeletedLinesBadge": {
           "type": "boolean",
           "default": true,
@@ -82,6 +98,7 @@
         "diffTracker.highlightModifiedLines": {
           "type": "boolean",
           "default": false,
+          "scope": "resource",
           "description": "Highlight modified lines with a background color"
         },
         "diffTracker.highlightWordChanges": {
@@ -125,7 +142,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "node --test test/change-navigation.mjs test/git-revisions.mjs test/revision-hover.mjs test/simple-sidebar.mjs test/line-changes.mjs && node test/live-deleted-text.mjs",
+    "test": "node --test test/change-navigation.mjs test/git-revisions.mjs test/revision-hover.mjs test/simple-sidebar.mjs test/line-changes.mjs test/revision-settings.mjs && node test/live-deleted-text.mjs",
     "lint": "eslint src",
     "package": "vsce package"
   },

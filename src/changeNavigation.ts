@@ -45,6 +45,14 @@ export function getChangeLocations(changes: readonly LineChange[], lines: readon
     return locations.filter((item, index) => index === 0 || item.line !== locations[index - 1].line || item.start !== locations[index - 1].start);
 }
 
+export function getChangePosition(editor: vscode.TextEditor, changes: readonly LineChange[]): { index: number; total: number } {
+    const lines = Array.from({ length: editor.document.lineCount }, (_, index) => editor.document.lineAt(index).text);
+    const locations = getChangeLocations(changes, lines);
+    const cursor = editor.selection.active;
+    const index = locations.findIndex(item => item.line === cursor.line && cursor.character >= item.start && cursor.character <= item.end);
+    return { index: index + 1, total: locations.length };
+}
+
 export function navigateChanges(editor: vscode.TextEditor, changes: readonly LineChange[], direction: 1 | -1): boolean {
     const lines = Array.from({ length: editor.document.lineCount }, (_, index) => editor.document.lineAt(index).text);
     const locations = getChangeLocations(changes, lines);

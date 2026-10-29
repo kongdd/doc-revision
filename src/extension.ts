@@ -2,27 +2,32 @@ import * as vscode from 'vscode';
 import { DecorationManager } from './decorationManager';
 import { DiffTreeDataProvider } from './diffTreeView';
 import { GitInlineRevision, GitRevision } from './gitRevision';
-import { navigateAndShowChange } from './changeNavigation';
+import { getChangePosition, navigateAndShowChange } from './changeNavigation';
 import { GitRevisionHoverProvider } from './revisionHover';
+import { revisionEditor, setRevisionSetting } from './revisionSettings';
 
 export function activate(context: vscode.ExtensionContext): void {
     const decorations = new DecorationManager();
-    const tree = new DiffTreeDataProvider(() => decorations.gitRevisionMode);
-    const revisions = new GitRevision(decorations, () => tree.refresh());
+    const getPosition = () => {
+        const editor = revisionEditor();
+        return editor ? getChangePosition(editor, revisions.getChanges(editor.document)) : { index: 0, total: 0 };
+    };
+    const tree = new DiffTreeDataProvider(() => decorations.gitRevisionMode, getPosition);
+    const navigation = new DiffTreeDataProvider(() => decorations.gitRevisionMode, getPosition, true);
+    const revisions = new GitRevision(decorations, () => { tree.refresh(); navigation.refresh(); });
     const hover = new GitRevisionHoverProvider(revisions);
-    context.subscriptions.push(decorations, tree, revisions,
+    context.subscriptions.push(decorations, tree, navigation, revisions,
         vscode.window.createTreeView('diffTracker.changesView', { treeDataProvider: tree }),
+        vscode.window.createTreeView('diffTracker.navigationView', { treeDataProvider: navigation }),
         vscode.languages.registerHoverProvider({ scheme: 'file' }, hover),
         vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('diffTracker.highlightModifiedLines')) { tree.refresh(); }
+            if (event.affectsConfiguration('diffTracker.highlightModifiedLines') || event.affectsConfiguration('diffTracker.showAllChanges')) { tree.refresh(); }
         }),
-        vscode.commands.registerCommand('diffTracker.toggleHighlight', async () => {
-            const config = vscode.workspace.getConfiguration('diffTracker');
-            const target = config.inspect('highlightModifiedLines')?.workspaceValue === undefined
-                ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace;
-            await config.update('highlightModifiedLines', !config.get<boolean>('highlightModifiedLines', false), target);
-        }),
+        vscode.commands.registerCommand('diffTracker.toggleHighlight', () => setRevisionSetting('highlightModifiedLines')),
+        vscode.commands.registerCommand('diffTracker.showUnstaged', () => setRevisionSetting('showAllChanges', false)),
+        vscode.commands.registerCommand('diffTracker.showAllChanges', () => setRevisionSetting('showAllChanges', true)),
         vscode.window.onDidChangeTextEditorSelection(event => {
+            if (event.textEditor === vscode.window.activeTextEditor) { navigation.refresh(); }
             if (event.kind !== vscode.TextEditorSelectionChangeKind.Mouse || event.textEditor !== vscode.window.activeTextEditor ||
                 !event.textEditor.selection.isEmpty) { return; }
             if (hover.find(event.textEditor.document, event.textEditor.selection.active)) {

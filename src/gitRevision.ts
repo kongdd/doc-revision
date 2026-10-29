@@ -5,6 +5,7 @@ import * as Diff from 'diff';
 import { getInlineRevisions } from './utils/liveDeletedText';
 import { DecorationManager } from './decorationManager';
 import { getLineChanges, LineChange } from './lineChanges';
+import { revisionConfig, revisionEditor, setRevisionSetting } from './revisionSettings';
 
 interface Repository {
     rootUri: vscode.Uri;
@@ -14,6 +15,8 @@ interface Repository {
 
 interface GitApi {
     git: { path: string };
+    onDidOpenRepository: vscode.Event<Repository>;
+    onDidChangeState: vscode.Event<string>;
     getRepository(uri: vscode.Uri): Repository | null;
 }
 
@@ -63,8 +66,11 @@ export class GitRevision implements vscode.Disposable {
     private timer?: ReturnType<typeof setTimeout>;
     private repositoryListener?: vscode.Disposable;
     private repository?: Repository;
+    private api?: GitApi;
+    private apiListeners: vscode.Disposable[] = [];
     private current?: { document: vscode.TextDocument; version: number; changes: LineChange[]; original: string;
-        request: number; repository: Repository; commit: string; file: string; gitPath: string };
+        staged: boolean; mixed: boolean; request: number; repository: Repository; commit: string; file: string; gitPath: string };
+    private readonly log = vscode.window.createOutputChannel('Git Revisions', { log: true });
     private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     private readonly subscriptions: vscode.Disposable[];
 
@@ -75,27 +81,37 @@ export class GitRevision implements vscode.Disposable {
         this.status.show();
         this.subscriptions = [
             vscode.commands.registerCommand('diffTracker.toggleGitRevisions', () => this.toggle()),
-            vscode.window.onDidChangeActiveTextEditor(() => this.refresh()),
+            vscode.window.onDidChangeActiveTextEditor(() => void this.sync()),
+            vscode.window.onDidChangeVisibleTextEditors(() => void this.sync()),
             vscode.workspace.onDidChangeConfiguration(event => {
-                if (event.affectsConfiguration('diffTracker')) { this.schedule(); }
+                if (event.affectsConfiguration('diffTracker.showRevisions')) { void this.sync(); }
+                else if (event.affectsConfiguration('diffTracker.showAllChanges')) { void this.sync(true); }
+                else if (event.affectsConfiguration('diffTracker')) { this.schedule(); }
             }),
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (event.document === vscode.window.activeTextEditor?.document) { this.schedule(); }
+                if (event.document === revisionEditor()?.document) { this.schedule(); }
             })
         ];
+        void this.sync();
     }
 
     private async toggle() {
-        this.enabled = !this.enabled;
+        if (await setRevisionSetting('showRevisions')) { await this.sync(true); }
+    }
+
+    private async sync(notify = false) {
+        this.enabled = revisionConfig().get<boolean>('showRevisions', false);
+        this.log.info(`sync enabled=${this.enabled} editor=${revisionEditor()?.document.uri.toString() ?? 'none'}`);
         this.decorations.gitRevisionMode = this.enabled;
         void vscode.commands.executeCommand('setContext', 'diffTracker.gitRevisions', this.enabled);
         this.onChange();
         this.status.text = `$(git-compare) Git Revisions: ${this.enabled ? 'On' : 'Off'}`;
         this.status.tooltip = this.enabled ? 'Click to hide Git revisions.' : 'Click to show unstaged Git changes.';
         if (this.enabled) {
-            await this.refresh(true);
+            await this.refresh(notify);
         } else {
             this.request++;
+            clearTimeout(this.timer);
             this.repositoryListener?.dispose();
             this.repositoryListener = undefined;
             this.repository = undefined;
@@ -104,47 +120,65 @@ export class GitRevision implements vscode.Disposable {
         }
     }
 
-    private schedule() {
+    private schedule(delay = 50) {
         if (!this.enabled) { return; }
         this.request++;
         this.current = undefined;
+        this.onChange();
         clearTimeout(this.timer);
-        this.timer = setTimeout(() => void this.refresh(), 150);
+        this.timer = setTimeout(() => void this.refresh(), delay);
     }
 
     private async refresh(notify = false) {
         if (!this.enabled) { return; }
         const request = ++this.request;
         this.current = undefined;
+        this.onChange();
         this.decorations.clearAllDecorations();
-        const editor = vscode.window.activeTextEditor;
+        const editor = revisionEditor();
         if (!editor || editor.document.uri.scheme !== 'file') { return; }
         const version = editor.document.version;
+        const started = Date.now();
+        this.log.info(`refresh #${request} start`);
         try {
             const extension = vscode.extensions.getExtension<{ getAPI(version: number): GitApi }>('vscode.git');
             if (!extension) { throw new Error('VS Code Git extension is unavailable.'); }
             const api = (extension.isActive ? extension.exports : await extension.activate()).getAPI(1);
             if (!this.enabled || request !== this.request) { return; }
+            if (api !== this.api) {
+                this.apiListeners.forEach(listener => listener.dispose());
+                this.api = api;
+                this.apiListeners = [api.onDidOpenRepository(() => this.schedule(0)), api.onDidChangeState(() => this.schedule(0))];
+            }
             const repository = api.getRepository(editor.document.uri);
-            const commit = repository?.state.HEAD?.commit;
-            if (!repository || !commit) { throw new Error('The current file is not in a Git repository with a commit.'); }
+            if (!repository) { throw new Error('The current file is not in an open Git repository.'); }
             if (repository !== this.repository) {
                 this.repositoryListener?.dispose();
                 this.repository = repository;
-                this.repositoryListener = repository.state.onDidChange(() => this.schedule());
+                this.repositoryListener = repository.state.onDidChange(() => this.schedule(this.current ? 50 : 0));
             }
+            const commit = repository.state.HEAD?.commit;
+            if (!commit) { throw new Error('The Git repository has no commit yet.'); }
             const file = path.relative(repository.rootUri.fsPath, editor.document.uri.fsPath).split(path.sep).join('/');
-            // Compare against the index so staged revisions are no longer pending.
-            const original = await repository.show('', file);
-            if (!this.enabled || request !== this.request || editor !== vscode.window.activeTextEditor || version !== editor.document.version) { return; }
+            const showAll = revisionConfig().get<boolean>('showAllChanges', false);
+            const [index, head] = await Promise.all([repository.show('', file), showAll ? repository.show(commit, file) : undefined]);
+            const original = head ?? index;
+            this.log.info(`refresh #${request} Git read ${Date.now() - started}ms`);
+            if (!this.enabled || request !== this.request || editor !== revisionEditor() || version !== editor.document.version) { return; }
+            const staged = showAll && index === editor.document.getText();
+            const mixed = showAll && index !== original && index !== editor.document.getText();
             if (original.length > 1024 * 1024 || editor.document.getText().length > 1024 * 1024) {
                 throw new Error('Git revisions are limited to files of 1 MiB.');
             }
             const changes = getLineChanges(original, editor.document.getText());
-            this.current = { document: editor.document, version, changes, original, request, repository, commit, file, gitPath: api.git.path };
-            this.status.tooltip = 'Showing unstaged changes against the Git index. Click to hide.';
+            this.current = { document: editor.document, version, changes, original, staged, mixed, request, repository, commit, file, gitPath: api.git.path };
+            this.status.tooltip = showAll ? 'Showing net changes against HEAD. Click to hide.' :
+                'Showing unstaged changes against the Git index. Click to hide.';
             this.decorations.renderLineChanges(editor, changes);
+            this.log.info(`refresh #${request} rendered ${changes.length} changes in ${Date.now() - started}ms`);
+            this.onChange();
         } catch (error) {
+            this.log.warn(`refresh #${request}: ${error instanceof Error ? error.message : String(error)}`);
             if (this.enabled && request === this.request) {
                 this.status.tooltip = `Git revisions unavailable: ${error instanceof Error ? error.message : String(error)}`;
             }
@@ -182,6 +216,8 @@ export class GitRevision implements vscode.Disposable {
             current.request !== ref.request || current.document.version !== ref.version || current.repository.state.HEAD?.commit !== current.commit) {
             throw new Error('Revision is stale; review it again.');
         }
+        if (current.mixed) { throw new Error('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); }
+        if (current.staged && action === 'accept') { throw new Error('Staged revisions cannot be accepted again.'); }
         const text = current.document.getText();
         let oldStart: number, oldEnd: number, newStart: number, newEnd: number;
         if (ref.block !== undefined) {
@@ -213,10 +249,10 @@ export class GitRevision implements vscode.Disposable {
         }
         const indexText = await current.repository.show('', current.file);
         if (this.current !== current || current.document.version !== ref.version ||
-            current.repository.state.HEAD?.commit !== current.commit || indexText !== current.original) {
+            current.repository.state.HEAD?.commit !== current.commit || indexText !== (current.staged ? text : current.original)) {
             throw new Error('Index or document changed; review again.');
         }
-        if (action === 'reject') {
+        if (action === 'reject' && !current.staged) {
             const edit = new vscode.WorkspaceEdit();
             edit.replace(current.document.uri, new vscode.Range(current.document.positionAt(newStart), current.document.positionAt(newEnd)),
                 current.original.slice(oldStart, oldEnd));
@@ -226,10 +262,20 @@ export class GitRevision implements vscode.Disposable {
         if (/[\x00\r\n\t\\]/.test(current.file) || current.file.startsWith('/') || current.file.startsWith('../')) {
             throw new Error('This path cannot be staged safely.');
         }
-        const next = current.original.slice(0, oldStart) + text.slice(newStart, newEnd) + current.original.slice(oldEnd);
-        const patch = Diff.createTwoFilesPatch(`a/${current.file}`, `b/${current.file}`, current.original, next, '', '');
+        const next = current.staged
+            ? text.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + text.slice(newEnd)
+            : current.original.slice(0, oldStart) + text.slice(newStart, newEnd) + current.original.slice(oldEnd);
+        if (current.staged) {
+            if (current.document.isDirty) { throw new Error('请先保存或处理未暂存的修改。'); }
+            const disk = await vscode.workspace.fs.readFile(current.document.uri);
+            if (this.current !== current || current.document.isDirty || current.document.version !== ref.version ||
+                current.repository.state.HEAD?.commit !== current.commit || !Buffer.from(disk).equals(Buffer.from(text, 'utf8'))) {
+                throw new Error('工作区文件已变更；未丢弃修订。');
+            }
+        }
+        const patch = Diff.createTwoFilesPatch(`a/${current.file}`, `b/${current.file}`, current.staged ? text : current.original, next, '', '');
         await new Promise<void>((resolve, reject) => {
-            const child = spawn(current.gitPath, ['apply', '--cached', '--whitespace=nowarn', '-'], { cwd: current.repository.rootUri.fsPath });
+            const child = spawn(current.gitPath, ['apply', current.staged ? '--index' : '--cached', '--whitespace=nowarn', '-'], { cwd: current.repository.rootUri.fsPath });
             let error = '';
             child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-4096); });
             child.on('error', reject);
@@ -238,6 +284,17 @@ export class GitRevision implements vscode.Disposable {
             child.stdin.end(patch);
         });
         this.schedule();
+        if (current.staged && current.document.isDirty) {
+            throw new Error('已丢弃暂存区和磁盘中的修订；编辑器有未保存的修改，请检查后保存。');
+        }
+    }
+
+    public isMixed(document: vscode.TextDocument): boolean {
+        return this.enabled && this.current?.document === document && this.current.version === document.version && this.current.mixed;
+    }
+
+    public isStaged(document: vscode.TextDocument): boolean {
+        return this.enabled && this.current?.document === document && this.current.version === document.version && this.current.staged;
     }
 
     public getChanges(document: vscode.TextDocument): readonly LineChange[] {
@@ -249,7 +306,9 @@ export class GitRevision implements vscode.Disposable {
         this.request++;
         clearTimeout(this.timer);
         this.repositoryListener?.dispose();
+        this.apiListeners.forEach(listener => listener.dispose());
         this.subscriptions.forEach(subscription => subscription.dispose());
         this.status.dispose();
+        this.log.dispose();
     }
 }

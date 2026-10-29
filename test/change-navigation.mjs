@@ -19,7 +19,7 @@ const vscode = { Position, Selection, Range, TextEditorRevealType: { InCenter: 0
 const module = { exports: {} };
 const source = ts.transpileModule(fs.readFileSync('src/changeNavigation.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 vm.runInNewContext(source, { module, exports: module.exports, require: name => name === 'vscode' ? vscode : require('../out/utils/liveDeletedText') });
-const { getChangeLocations, navigateChanges, navigateAndShowChange } = module.exports;
+const { getChangeLocations, getChangePosition, navigateChanges, navigateAndShowChange } = module.exports;
 
 test('navigate individual edits on one line and wrap in both directions', () => {
     const text = 'The quick red fox jumps over the sleepy dog.';
@@ -27,11 +27,15 @@ test('navigate individual edits on one line and wrap in both directions', () => 
     const locations = getChangeLocations(changes, [text]);
     assert.equal(locations.length, 2);
     const editor = { document: { lineCount: 1, lineAt: () => ({ text }) }, selection: new Selection(new Position(0, 0), new Position(0, 0)), revealRange() {} };
+    assert.equal(getChangePosition(editor, changes).index, 0);
+    assert.equal(getChangePosition(editor, changes).total, 2);
     assert.equal(navigateChanges(editor, changes, 1), true);
+    assert.equal(getChangePosition(editor, changes).index, 1);
     assert.equal(editor.selection.start.character, locations[0].start);
     assert.equal(editor.selection.active.character, locations[0].start);
     navigateChanges(editor, changes, 1);
     assert.equal(editor.selection.start.character, locations[1].start);
+    assert.equal(getChangePosition(editor, changes).index, 2);
     navigateChanges(editor, changes, 1);
     assert.equal(editor.selection.start.character, locations[0].start);
     navigateChanges(editor, changes, -1);

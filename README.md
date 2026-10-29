@@ -9,11 +9,13 @@ Review unstaged Git changes in the current file using a Word-style revision mode
 3. Click a revision and use the arrows to navigate, or use the sidebar navigation.
 4. **Accept** stages the selected revision. **Reject** reverts it in the editor buffer; save the file to persist the revert.
 
-Staged changes disappear from the revision display. Modified-line backgrounds are off by default and can be enabled in the sidebar; inline revision markers remain visible.
+Choose **Show Unstaged** or **Show All Changes** (net changes against HEAD). For staged revisions, Accept is disabled and Reject discards the selected change from both index and disk. When staged and unstaged changes coexist, the all-changes view is read-only; switch to Show Unstaged to review unstaged changes.
+
+Sidebar settings are saved in the current workspace folder's `.vscode/settings.json` and restored on reopening. Backgrounds are off by default; inline revision markers remain visible.
 
 ## Limitations
 
-- The built-in VS Code Git extension must be enabled. Files not yet in the index are not supported.
+- The built-in VS Code Git extension must be enabled. Files not yet in the index, or files absent from HEAD in the all-changes view, are not supported. Staged changes reversed in the working tree have no net difference and are not shown.
 - Files are limited to 1 MiB. Deleted text is virtual and cannot be selected or copied.
 - The former recording workflow has been removed. Existing recording data is not deleted, but is no longer read or displayed.
 

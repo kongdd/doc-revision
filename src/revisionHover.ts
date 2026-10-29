@@ -28,10 +28,12 @@ export class GitRevisionHoverProvider implements vscode.HoverProvider {
         if (!location) { return; }
         const revision = this.gitRevision.getInlineRevision(document, position);
         const args = encodeURIComponent(JSON.stringify([revision]));
-        const actions = revision
-            ? `[✓ Accept](command:diffTracker.acceptGitRevision?${args})　[↩ Reject](command:diffTracker.rejectGitRevision?${args})　`
+        const staged = this.gitRevision.isStaged(document);
+        const mixed = this.gitRevision.isMixed(document);
+        const actions = mixed ? '暂存与未暂存混合：请切换到 Show Unstaged。\n\n' : revision
+            ? `${staged ? '`✓ Accept`' : `[✓ Accept](command:diffTracker.acceptGitRevision?${args})`}　[↩ Reject](command:diffTracker.rejectGitRevision?${args})　`
             : '';
-        const markdown = new vscode.MarkdownString(`**Git revision · ${location.index} / ${location.total}**\n\n${actions}[↑](command:diffTracker.previousChange)　[↓](command:diffTracker.nextChange)`);
+        const markdown = new vscode.MarkdownString(`**${staged ? 'Staged revision' : 'Git revision'} · ${location.index} / ${location.total}**\n\n${actions}[↑](command:diffTracker.previousChange)　[↓](command:diffTracker.nextChange)`);
         markdown.isTrusted = { enabledCommands: ['diffTracker.acceptGitRevision', 'diffTracker.rejectGitRevision', 'diffTracker.previousChange', 'diffTracker.nextChange'] };
         return new vscode.Hover(markdown, location.range);
     }
