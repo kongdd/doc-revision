@@ -82,14 +82,9 @@ export class GitRevision implements vscode.Disposable {
     private current?: { document: vscode.TextDocument; version: number; changes: LineChange[]; original: string;
         staged: boolean; mixed: boolean; index: string; request: number; repository: Repository; commit: string; file: string; gitPath: string };
     private readonly log = vscode.window.createOutputChannel('Git Revisions', { log: true });
-    private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     private readonly subscriptions: vscode.Disposable[];
 
     constructor(private decorations: DecorationManager, private onChange: () => void = () => {}) {
-        this.status.command = 'diffTracker.toggleGitRevisions';
-        this.status.text = '$(git-compare) Git Revisions: Off';
-        this.status.tooltip = 'Click to show unstaged Git changes.';
-        this.status.show();
         this.subscriptions = [
             vscode.commands.registerCommand('diffTracker.toggleGitRevisions', () => this.toggle()),
             vscode.window.onDidChangeActiveTextEditor(() => void this.sync()),
@@ -116,8 +111,6 @@ export class GitRevision implements vscode.Disposable {
         this.decorations.gitRevisionMode = this.enabled;
         void vscode.commands.executeCommand('setContext', 'diffTracker.gitRevisions', this.enabled);
         this.onChange();
-        this.status.text = `$(git-compare) Git Revisions: ${this.enabled ? 'On' : 'Off'}`;
-        this.status.tooltip = this.enabled ? 'Click to hide Git revisions.' : 'Click to show unstaged Git changes.';
         if (this.enabled) {
             await this.refresh(notify);
         } else {
@@ -201,8 +194,6 @@ export class GitRevision implements vscode.Disposable {
             }
             const changes = getLineChanges(original, editor.document.getText());
             this.current = { document: editor.document, version, changes, original, staged, mixed, index, request, repository, commit, file, gitPath: api.git.path };
-            this.status.tooltip = showAll ? 'Showing net changes against HEAD. Click to hide.' :
-                'Showing unstaged changes against the Git index. Click to hide.';
             this.decorations.renderLineChanges(editor, changes);
             this.renderedEditor = editor;
             this.log.info(`refresh #${request} rendered ${changes.length} changes in ${Date.now() - started}ms`);
@@ -214,7 +205,6 @@ export class GitRevision implements vscode.Disposable {
                 this.onChange();
                 this.decorations.clearAllDecorations();
                 this.renderedEditor = undefined;
-                this.status.tooltip = `Git revisions unavailable: ${error instanceof Error ? error.message : String(error)}`;
             }
             if (notify && this.enabled && request === this.request) {
                 void vscode.window.showWarningMessage(`Git revisions unavailable for this file: ${error instanceof Error ? error.message : String(error)}`);
@@ -405,7 +395,6 @@ export class GitRevision implements vscode.Disposable {
         this.repositoryListener?.dispose();
         this.apiListeners.forEach(listener => listener.dispose());
         this.subscriptions.forEach(subscription => subscription.dispose());
-        this.status.dispose();
         this.log.dispose();
     }
 }

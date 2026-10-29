@@ -73,16 +73,13 @@ function setup(show, options = {}) {
 test('Git revisions compare against the index and can be toggled', async () => {
     const calls = [];
     const h = setup(async (...args) => { calls.push(args); return 'committed'; });
-    assert.match(h.status.text, /Off/);
     await h.events.toggle();
-    assert.match(h.status.text, /On/);
     assert.deepEqual(calls, [['', 'a.txt']]);
     assert.equal(h.renders[0][0].oldText, 'committed');
     assert.equal(h.renders[0][0].newText, 'edited');
     assert.equal(h.decorations.gitRevisionMode, true);
     await h.events.toggle();
     assert.equal(h.decorations.gitRevisionMode, false);
-    assert.match(h.status.text, /Off/);
     h.instance.dispose();
 });
 
@@ -146,7 +143,6 @@ test('navigation distinguishes an edited document awaiting refresh from no revis
 test('restores revision mode from folder settings on activation and editor changes', async () => {
     const h = setup(async () => 'committed', { enabled: true });
     assert.equal(h.decorations.gitRevisionMode, true);
-    assert.match(h.status.text, /On/);
     h.settings.showRevisions = false;
     await h.events.editor();
     assert.equal(h.decorations.gitRevisionMode, false);
@@ -342,6 +338,39 @@ test('accept stages only one inline revision in a real Git index', async () => {
         assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), original);
         await assert.rejects(h.instance.applyInlineRevision(ref, 'accept'), /stale/);
         h.instance.dispose();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('repeated-character deletion is one revision for hover, reject and accept', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-revision-cjk-'));
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    try {
+        git('init', '-q');
+        const deleted = '难以充分考虑水利工程调节等影响的问题，';
+        const original = `针对模型，${deleted}以步骤S4计算，数值旧。\n`;
+        const current = '针对模型，以步骤S4计算，数值新。\n';
+        const column = current.indexOf('以步骤');
+        fs.writeFileSync(path.join(root, 'a.txt'), original);
+        git('add', 'a.txt');
+        const show = async () => git('show', ':a.txt');
+        const reject = setup(show, { root, current });
+        await reject.events.toggle();
+        const ref = reject.instance.getInlineRevision(reject.document, { line: 0, character: column });
+        assert.ok(ref);
+        assert.equal(reject.instance.getDeletedText(reject.document, { line: 0, character: column }, ref), deleted);
+        await reject.instance.applyInlineRevision(ref, 'reject');
+        assert.equal(reject.edits.length, 1);
+        assert.equal(reject.edits[0].range.start.character, column);
+        assert.equal(reject.edits[0].range.end.character, column);
+        assert.equal(reject.edits[0].text, deleted);
+        reject.instance.dispose();
+
+        const accept = setup(show, { root, current });
+        await accept.events.toggle();
+        await accept.instance.applyInlineRevision(accept.instance.getInlineRevision(accept.document, { line: 0, character: column }), 'accept');
+        assert.equal(git('show', ':a.txt'), '针对模型，以步骤S4计算，数值旧。\n');
+        assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), original);
+        accept.instance.dispose();
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

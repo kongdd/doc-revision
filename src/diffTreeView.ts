@@ -18,6 +18,8 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
             position.iconPath = new vscode.ThemeIcon('list-ordered');
             return [position, this.item('上一处', '', 'arrow-up', 'diffTracker.previousChange'),
                 this.item('下一处', '', 'arrow-down', 'diffTracker.nextChange'),
+                this.item('接受选中行', '', 'check', 'diffTracker.acceptSelection'),
+                this.item('拒绝选中行', '', 'discard', 'diffTracker.rejectSelection'),
                 this.item('全部接受', '', 'check-all', 'diffTracker.acceptAllRevisions'),
                 this.item('全部拒绝', '', 'discard', 'diffTracker.rejectAllRevisions')];
         }

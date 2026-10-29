@@ -42,6 +42,15 @@ test('navigate individual edits on one line and wrap in both directions', () => 
     assert.equal(editor.selection.start.character, locations[1].start);
 });
 
+test('repeated-character deletion is a single navigation stop', () => {
+    const oldText = '针对模型，难以充分考虑影响的问题，以步骤S4计算';
+    const newText = '针对模型，以步骤S4计算';
+    const locations = getChangeLocations([{ type: 'modified', lineNumber: 1, oldText, newText }], [newText]);
+    assert.equal(locations.length, 1);
+    assert.equal(locations[0].start, newText.indexOf('以步骤'));
+    assert.equal(locations[0].end, locations[0].start);
+});
+
 test('navigation count stays visible while recalculating and resets for another file or no changes', () => {
     const text = 'The quick red fox';
     const changes = [{ type: 'modified', lineNumber: 1, oldText: 'The quick brown fox', newText: text }];

@@ -1,13 +1,13 @@
-# Code Diff Tracker
+# Document Revision
 
 Review unstaged Git changes in the current file using a Word-style revision mode.
 
 ## Usage
 
 1. Open an indexed file in a Git repository with an existing commit.
-2. Enable revisions from the sidebar or status bar, or press `Shift+Option+G` on macOS (`Shift+Alt+G` on Windows/Linux).
+2. Enable revisions from the sidebar, or press `Shift+Option+G` on macOS (`Shift+Alt+G` on Windows/Linux).
 3. Click a revision and use the arrows to navigate, or use the sidebar navigation.
-4. **Accept** stages the selected revision. **Reject** reverts it in the editor buffer; save the file to persist the revert. Use **Accept All** or **Reject All** in the revision navigation view to process the current file after confirmation, or select lines and choose **Accept/Reject Selected Revisions** from the editor context menu.
+4. **Accept** stages the selected revision. **Reject** reverts it in the editor buffer; save the file to persist the revert. Use **Accept All** or **Reject All** in the revision navigation view to process the current file after confirmation, or select lines and choose **接受选中行 / 拒绝选中行** in the revision navigation view.
 5. For deleted text, select and copy from the revision hover.
 
 Choose **Show Unstaged** or **Show All Changes** (net changes against HEAD). For staged revisions, Accept is disabled and Reject discards the selected change from both index and disk. When staged and unstaged changes coexist, Accept stages a revision and Reject reverts it in both the buffer and, when present, the index; if adjacent staged edits conflict, Git reports it.

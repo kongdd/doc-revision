@@ -72,11 +72,31 @@ export interface InlineRevision {
     newText: string;
 }
 
+type TextDiffPart = { value: string; added?: boolean; removed?: boolean };
+
+function inlineDiff(oldText: string, newText: string): TextDiffPart[] {
+    if (!/[\u2e80-\u9fff\uf900-\ufaff]/.test(oldText + newText)) {
+        return Diff.diffWordsWithSpace(oldText, newText);
+    }
+    const result: TextDiffPart[] = [];
+    for (const part of Diff.diffChars(oldText, newText)) {
+        const shared = result[result.length - 1];
+        const previous = result[result.length - 2];
+        // Prefer one deletion when the same CJK character can be kept at either end.
+        if (part.removed && previous?.removed && shared && !shared.added && !shared.removed &&
+            /^[\u2e80-\u9fff\uf900-\ufaff]$/.test(shared.value) && part.value.endsWith(shared.value)) {
+            result[result.length - 2] = { removed: true, value: previous.value + shared.value + part.value.slice(0, -shared.value.length) };
+        } else {
+            result.push(part);
+        }
+    }
+    return result;
+}
+
 /** Adjacent insertions and deletions form one independently reviewable revision. */
 export function getInlineRevisions(oldText: string, newText: string): InlineRevision[] {
     if (oldText.length + newText.length > 4096) { return []; }
-    const isCjk = /[\u2e80-\u9fff\uf900-\ufaff]/.test(oldText + newText);
-    const parts = isCjk ? Diff.diffChars(oldText, newText) : Diff.diffWordsWithSpace(oldText, newText);
+    const parts = inlineDiff(oldText, newText);
     const revisions: InlineRevision[] = [];
     let oldOffset = 0;
     let newOffset = 0;
@@ -112,8 +132,7 @@ export function diffModifiedLine(oldText: string, newText: string): ModifiedLine
             removed: oldText ? [{ column: 0, text: oldText }] : []
         };
     }
-    const isCjk = /[\u2e80-\u9fff\uf900-\ufaff]/.test(oldText + newText);
-    const parts = isCjk ? Diff.diffChars(oldText, newText) : Diff.diffWordsWithSpace(oldText, newText);
+    const parts = inlineDiff(oldText, newText);
     const added: ModifiedLineGhosts['added'] = [];
     const removed: ModifiedLineGhosts['removed'] = [];
     let column = 0;

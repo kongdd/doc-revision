@@ -1,8 +1,8 @@
 {
-  "name": "code-diff-tracker",
-  "displayName": "Code Diff Tracker",
+  "name": "doc-revision",
+  "displayName": "Document Revision",
   "description": "Review unstaged Git changes in a Word-style revision mode",
-  "version": "0.8.12",
+  "version": "0.1.0",
   "publisher": "lengmh",
   "author": "TinyTigerPan",
   "license": "MIT",
@@ -35,7 +35,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "Code Diff Tracker reads and can restore workspace file contents."
+      "description": "Document Revision reads and can restore workspace file contents."
     }
   },
   "main": "./out/extension.js",
@@ -48,7 +48,7 @@
       "activitybar": [
         {
           "id": "diffTracker",
-          "title": "Code Diff Tracker",
+          "title": "Document Revision",
           "icon": "resources/record-icon.svg"
         }
       ]
@@ -66,7 +66,7 @@
       ]
     },
     "configuration": {
-      "title": "Code Diff Tracker",
+      "title": "Document Revision",
       "properties": {
         "diffTracker.showRevisions": {
           "type": "boolean",
@@ -112,47 +112,41 @@
       {
         "command": "diffTracker.previousChange",
         "title": "Previous Change",
-        "category": "Code Diff Tracker",
+        "category": "Document Revision",
         "icon": "$(arrow-up)"
       },
       {
         "command": "diffTracker.nextChange",
         "title": "Next Change",
-        "category": "Code Diff Tracker",
+        "category": "Document Revision",
         "icon": "$(arrow-down)"
       },
       {
         "command": "diffTracker.acceptAllRevisions",
         "title": "全部接受当前文件的修订",
-        "category": "Code Diff Tracker"
+        "category": "Document Revision"
       },
       {
         "command": "diffTracker.rejectAllRevisions",
         "title": "全部拒绝当前文件的修订",
-        "category": "Code Diff Tracker"
+        "category": "Document Revision"
       },
       {
         "command": "diffTracker.acceptSelection",
-        "title": "Accept Selected Revisions",
-        "category": "Code Diff Tracker"
+        "title": "接受选中行的修订",
+        "category": "Document Revision"
       },
       {
         "command": "diffTracker.rejectSelection",
-        "title": "Reject Selected Revisions",
-        "category": "Code Diff Tracker"
+        "title": "拒绝选中行的修订",
+        "category": "Document Revision"
       },
       {
         "command": "diffTracker.toggleGitRevisions",
         "title": "Toggle Git Revisions for Current File",
-        "category": "Code Diff Tracker"
+        "category": "Document Revision"
       }
     ],
-    "menus": {
-      "editor/context": [
-        { "command": "diffTracker.acceptSelection", "when": "editorHasSelection && resourceScheme == file", "group": "diffTracker@1" },
-        { "command": "diffTracker.rejectSelection", "when": "editorHasSelection && resourceScheme == file", "group": "diffTracker@2" }
-      ]
-    },
     "keybindings": [
       {
         "command": "diffTracker.toggleGitRevisions",
@@ -169,7 +163,7 @@
     "pretest": "npm run compile",
     "test": "node --test test/change-navigation.mjs test/git-revisions.mjs test/revision-hover.mjs test/simple-sidebar.mjs test/line-changes.mjs test/revision-settings.mjs && node test/live-deleted-text.mjs",
     "lint": "eslint src",
-    "package": "vsce package"
+    "package": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && vsce package --out dist"
   },
   "devDependencies": {
     "@types/node": "^20.x",
