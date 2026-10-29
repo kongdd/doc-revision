@@ -35,7 +35,12 @@ export class GitRevisionHoverProvider implements vscode.HoverProvider {
             : '';
         const markdown = new vscode.MarkdownString(`**${staged ? 'Staged revision' : 'Git revision'} · ${location.index} / ${location.total}**\n\n${actions}[↑](command:diffTracker.previousChange)　[↓](command:diffTracker.nextChange)`);
         markdown.isTrusted = { enabledCommands: ['diffTracker.acceptGitRevision', 'diffTracker.rejectGitRevision', 'diffTracker.previousChange', 'diffTracker.nextChange'] };
-        return new vscode.Hover(markdown, location.range);
+        const deleted = this.gitRevision.getDeletedText(document, position, revision);
+        if (!deleted) { return new vscode.Hover(markdown, location.range); }
+        const fenceLength = (deleted.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length + 1), 3);
+        const fence = '`'.repeat(fenceLength);
+        const original = new vscode.MarkdownString(`${fence}\n${deleted}\n${fence}`);
+        return new vscode.Hover([markdown, original], location.range);
     }
 }
 

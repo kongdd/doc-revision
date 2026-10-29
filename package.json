@@ -2,7 +2,7 @@
   "name": "code-diff-tracker",
   "displayName": "Code Diff Tracker",
   "description": "Review unstaged Git changes in a Word-style revision mode",
-  "version": "0.8.13",
+  "version": "0.8.12",
   "publisher": "lengmh",
   "author": "TinyTigerPan",
   "license": "MIT",
@@ -122,12 +122,37 @@
         "icon": "$(arrow-down)"
       },
       {
+        "command": "diffTracker.acceptAllRevisions",
+        "title": "全部接受当前文件的修订",
+        "category": "Code Diff Tracker"
+      },
+      {
+        "command": "diffTracker.rejectAllRevisions",
+        "title": "全部拒绝当前文件的修订",
+        "category": "Code Diff Tracker"
+      },
+      {
+        "command": "diffTracker.acceptSelection",
+        "title": "Accept Selected Revisions",
+        "category": "Code Diff Tracker"
+      },
+      {
+        "command": "diffTracker.rejectSelection",
+        "title": "Reject Selected Revisions",
+        "category": "Code Diff Tracker"
+      },
+      {
         "command": "diffTracker.toggleGitRevisions",
         "title": "Toggle Git Revisions for Current File",
         "category": "Code Diff Tracker"
       }
     ],
-    "menus": {},
+    "menus": {
+      "editor/context": [
+        { "command": "diffTracker.acceptSelection", "when": "editorHasSelection && resourceScheme == file", "group": "diffTracker@1" },
+        { "command": "diffTracker.rejectSelection", "when": "editorHasSelection && resourceScheme == file", "group": "diffTracker@2" }
+      ]
+    },
     "keybindings": [
       {
         "command": "diffTracker.toggleGitRevisions",

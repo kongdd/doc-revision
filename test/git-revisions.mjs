@@ -15,8 +15,17 @@ function setup(show, options = {}) {
     const root = options.root ?? '/repo';
     const file = path.join(root, 'a.txt');
     const document = { uri: { scheme: 'file', fsPath: file, toString: () => `file://${file}` }, version: 1, isDirty: options.dirty ?? false,
-        getText: () => options.current ?? 'edited', lineAt: () => ({ text: options.current?.trimEnd() ?? 'edited' }),
-        offsetAt: position => position.character, positionAt: offset => ({ line: 0, character: offset }) };
+        getText: () => options.current ?? 'edited',
+        lineAt(line) {
+            const lines = this.getText().split('\n');
+            const start = lines.slice(0, line).reduce((sum, item) => sum + item.length + 1, 0);
+            return { text: lines[line], rangeIncludingLineBreak: { end: { offset: start + lines[line].length + (line < lines.length - 1 ? 1 : 0) } } };
+        },
+        offsetAt(position) {
+            if (position.offset !== undefined) { return position.offset; }
+            return this.getText().split('\n').slice(0, position.line).reduce((sum, item) => sum + item.length + 1, 0) + position.character;
+        },
+        positionAt(offset) { return { line: 0, character: offset }; } };
     const editor = { document };
     const status = { show() {}, hide() {}, dispose() {} };
     const repository = { rootUri: { fsPath: root }, state: { HEAD: { commit: options.commit ?? 'abc' }, onDidChange: listen('git') }, show };
@@ -146,6 +155,116 @@ test('all-changes mode reads HEAD and index concurrently', async () => {
     await opening;
     assert.equal(h.renders.length, 1);
     h.instance.dispose();
+});
+
+test('all accept stages the entire editor buffer without saving', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-revision-all-'));
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    try {
+        git('init', '-q');
+        const original = 'old line\nkeep\nremove\n';
+        const current = 'new line\nkeep\nadded\n';
+        fs.writeFileSync(path.join(root, 'a.txt'), original);
+        git('add', 'a.txt');
+        const h = setup(async () => git('show', ':a.txt'), { root, current, dirty: true });
+        await h.events.toggle();
+        await h.instance.applyAllRevisions(h.instance.getAllRevisions(h.document), 'accept');
+        assert.equal(git('show', ':a.txt'), current);
+        assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), original);
+        h.instance.dispose();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('all reject restores every revision in one workspace edit', async () => {
+    const original = 'old line\nkeep\nremove\n';
+    const current = 'new line\nkeep\nadded\n';
+    const h = setup(async () => original, { current });
+    await h.events.toggle();
+    const ref = h.instance.getAllRevisions(h.document);
+    await h.instance.applyAllRevisions(ref, 'reject');
+    assert.deepEqual(h.edits.map(edit => edit.text), ['old line\n', 'remove\n']);
+    h.instance.dispose();
+});
+
+test('selection reject restores only the selected lines', async () => {
+    const original = 'a\nb\nc\nd\n';
+    const current = 'A\nb\nc\nD\n';
+    const h = setup(async () => original, { current });
+    await h.events.toggle();
+    const ref = h.instance.getAllRevisions(h.document);
+    const range = { start: { line: 3, character: 0 }, end: { line: 3, character: 1 } };
+    await h.instance.applyAllRevisions(ref, 'reject', [range]);
+    assert.equal(h.edits.length, 1);
+    assert.equal(h.edits[0].range.start.character, 6);
+    assert.equal(h.edits[0].text, 'd\n');
+    await assert.rejects(h.instance.applyAllRevisions(ref, 'reject', [{ start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }]), /选区内没有修订/);
+    h.instance.dispose();
+});
+
+test('all actions reject stale or mixed changes', async () => {
+    const h = setup(async ref => ref ? 'HEAD' : 'index', { current: 'buffer', staged: true });
+    await h.events.toggle();
+    const ref = h.instance.getAllRevisions(h.document);
+    await assert.rejects(h.instance.applyAllRevisions(ref, 'accept'), /同时存在/);
+    await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /同时存在/);
+    h.document.version++;
+    await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /修订已变化/);
+    h.instance.dispose();
+    const unchanged = setup(async () => 'edited');
+    await unchanged.events.toggle();
+    assert.equal(unchanged.instance.getAllRevisions(unchanged.document), undefined);
+    unchanged.instance.dispose();
+});
+
+test('all reject staged changes checks disk and restores index and disk', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-revision-all-staged-'));
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    try {
+        git('init', '-q');
+        git('config', 'user.email', 'test@example.com');
+        git('config', 'user.name', 'Test');
+        git('config', 'core.autocrlf', 'false');
+        const original = 'old\nremove\n';
+        const current = 'new\nadd\n';
+        fs.writeFileSync(path.join(root, 'a.txt'), original);
+        git('add', 'a.txt');
+        git('commit', '-qm', 'baseline');
+        const commit = git('rev-parse', 'HEAD').trim();
+        fs.writeFileSync(path.join(root, 'a.txt'), current);
+        git('add', 'a.txt');
+        const h = setup(async ref => git('show', `${ref || ''}:a.txt`), { root, commit, current, staged: true });
+        await h.events.toggle();
+        const ref = h.instance.getAllRevisions(h.document);
+        await assert.rejects(h.instance.applyAllRevisions(ref, 'accept'), /无法再次接受/);
+        h.document.isDirty = true;
+        await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /保存/);
+        h.document.isDirty = false;
+        fs.writeFileSync(path.join(root, 'a.txt'), current + 'external');
+        await assert.rejects(h.instance.applyAllRevisions(ref, 'reject'), /工作区文件已变更/);
+        fs.writeFileSync(path.join(root, 'a.txt'), current);
+        const past = new Date(Date.now() - 5000);
+        fs.utimesSync(path.join(root, 'a.txt'), past, past); // stale stat data must not block git apply --index
+        await h.instance.applyAllRevisions(ref, 'reject');
+        assert.equal(git('show', ':a.txt'), original);
+        assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), original);
+        h.instance.dispose();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('deleted text is exposed in full for modified and deleted blocks', async () => {
+    const original = 'The quick brown fox\n';
+    const current = 'The quick red fox\n';
+    const h = setup(async () => original, { current });
+    await h.events.toggle();
+    const position = { line: 0, character: 11 };
+    const ref = h.instance.getInlineRevision(h.document, position);
+    assert.equal(h.instance.getDeletedText(h.document, position, ref), 'brown');
+    h.instance.dispose();
+    const block = setup(async () => 'first\nsecond\n', { current: '' });
+    await block.events.toggle();
+    const start = { line: 0, character: 0 };
+    assert.equal(block.instance.getDeletedText(block.document, start, block.instance.getInlineRevision(block.document, start)), 'first\nsecond\n');
+    block.instance.dispose();
 });
 
 test('accept stages only one inline revision in a real Git index', async () => {

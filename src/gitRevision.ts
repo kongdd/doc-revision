@@ -29,6 +29,14 @@ export interface GitInlineRevision {
     block?: number;
 }
 
+export interface GitAllRevisions {
+    request: number;
+    version: number;
+    staged: boolean;
+    mixed: boolean;
+    file: string;
+}
+
 interface GitTextBlock {
     oldStart: number;
     oldEnd: number;
@@ -36,13 +44,13 @@ interface GitTextBlock {
     newEnd: number;
 }
 
-function getPureBlocks(original: string, current: string): GitTextBlock[] {
+function getPureBlocks(original: string, current: string, all = false): GitTextBlock[] {
     const blocks: GitTextBlock[] = [];
     let oldOffset = 0;
     let newOffset = 0;
     let block: GitTextBlock | undefined;
     const finish = () => {
-        if (block && (block.oldStart === block.oldEnd || block.newStart === block.newEnd)) { blocks.push(block); }
+        if (block && (all || block.oldStart === block.oldEnd || block.newStart === block.newEnd)) { blocks.push(block); }
         block = undefined;
     };
     for (const part of Diff.diffLines(original, current)) {
@@ -209,6 +217,21 @@ export class GitRevision implements vscode.Disposable {
         return;
     }
 
+    public getDeletedText(document: vscode.TextDocument, position: vscode.Position, ref?: GitInlineRevision): string | undefined {
+        const current = this.current;
+        if (!this.enabled || !current || current.document !== document || current.version !== document.version) { return; }
+        if (ref?.block !== undefined) {
+            const block = getPureBlocks(current.original, document.getText())[ref.block];
+            return block && current.original.slice(block.oldStart, block.oldEnd) || undefined;
+        }
+        const change = current.changes.find(item => item.type === 'modified' && item.lineNumber === position.line + 1 &&
+            item.newText === document.lineAt(position.line).text && (ref ? item.originalLineNumber === ref.originalLine + 1 : true));
+        if (!change || change.oldText === undefined || change.newText === undefined) { return; }
+        if (ref) { return getInlineRevisions(change.oldText, change.newText)[ref.index]?.oldText || undefined; }
+        if (change.oldText.length + change.newText.length > 4096) { return change.oldText || undefined; }
+        return;
+    }
+
     public async applyInlineRevision(ref: GitInlineRevision, action: 'accept' | 'reject'): Promise<void> {
         const current = this.current;
         const editor = vscode.window.activeTextEditor;
@@ -247,42 +270,79 @@ export class GitRevision implements vscode.Disposable {
             newStart = current.document.offsetAt(new vscode.Position(ref.line, revision.newStart));
             newEnd = current.document.offsetAt(new vscode.Position(ref.line, revision.newEnd));
         }
+        await this.applyRange(current, action, [{ oldStart, oldEnd, newStart, newEnd }]);
+    }
+
+    public getAllRevisions(document: vscode.TextDocument): GitAllRevisions | undefined {
+        const current = this.current;
+        if (!this.enabled || !current || current.document !== document || current.version !== document.version || !current.changes.some(change => change.type !== 'unchanged')) { return; }
+        return { request: current.request, version: current.version, staged: current.staged, mixed: current.mixed, file: current.file };
+    }
+
+    public async applyAllRevisions(ref: GitAllRevisions, action: 'accept' | 'reject', selections?: readonly vscode.Range[]): Promise<void> {
+        const current = this.current;
+        if (!this.enabled || !current || revisionEditor()?.document !== current.document || current.request !== ref.request ||
+            current.version !== ref.version || current.document.version !== ref.version || current.repository.state.HEAD?.commit !== current.commit) {
+            throw new Error('修订已变化，请重新操作。');
+        }
+        if (current.mixed) { throw new Error('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); }
+        if (current.staged && action === 'accept') { throw new Error('修订已暂存，无法再次接受。'); }
+        const document = current.document;
+        const lines = selections?.map(range => [range.start.line, range.end.line > range.start.line && !range.end.character ? range.end.line - 1 : range.end.line]);
+        const spans = lines?.map(([start, end]) => [document.offsetAt(new vscode.Position(start, 0)), document.offsetAt(document.lineAt(end).rangeIncludingLineBreak.end)]);
+        const blocks = getPureBlocks(current.original, document.getText(), true).filter(block => !spans || spans.some(([start, end]) =>
+            block.newStart === block.newEnd ? start <= block.newStart && block.newStart <= end : start < block.newEnd && end > block.newStart));
+        if (!blocks.length) { throw new Error('选区内没有修订。'); }
+        await this.applyRange(current, action, blocks);
+    }
+
+    private async applyRange(current: NonNullable<GitRevision['current']>, action: 'accept' | 'reject',
+        blocks: readonly GitTextBlock[]): Promise<void> {
+        const text = current.document.getText();
         const indexText = await current.repository.show('', current.file);
-        if (this.current !== current || current.document.version !== ref.version ||
+        if (this.current !== current || current.document.version !== current.version ||
             current.repository.state.HEAD?.commit !== current.commit || indexText !== (current.staged ? text : current.original)) {
             throw new Error('Index or document changed; review again.');
         }
         if (action === 'reject' && !current.staged) {
             const edit = new vscode.WorkspaceEdit();
-            edit.replace(current.document.uri, new vscode.Range(current.document.positionAt(newStart), current.document.positionAt(newEnd)),
-                current.original.slice(oldStart, oldEnd));
+            for (const { oldStart, oldEnd, newStart, newEnd } of blocks) {
+                edit.replace(current.document.uri, new vscode.Range(current.document.positionAt(newStart), current.document.positionAt(newEnd)),
+                    current.original.slice(oldStart, oldEnd));
+            }
             if (!await vscode.workspace.applyEdit(edit)) { throw new Error('Could not discard the revision.'); }
             return;
         }
         if (/[\x00\r\n\t\\]/.test(current.file) || current.file.startsWith('/') || current.file.startsWith('../')) {
             throw new Error('This path cannot be staged safely.');
         }
-        const next = current.staged
-            ? text.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + text.slice(newEnd)
-            : current.original.slice(0, oldStart) + text.slice(newStart, newEnd) + current.original.slice(oldEnd);
+        let next = current.staged ? text : current.original;
+        for (const { oldStart, oldEnd, newStart, newEnd } of [...blocks].reverse()) {
+            next = current.staged
+                ? next.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + next.slice(newEnd)
+                : next.slice(0, oldStart) + text.slice(newStart, newEnd) + next.slice(oldEnd);
+        }
         if (current.staged) {
             if (current.document.isDirty) { throw new Error('请先保存或处理未暂存的修改。'); }
             const disk = await vscode.workspace.fs.readFile(current.document.uri);
-            if (this.current !== current || current.document.isDirty || current.document.version !== ref.version ||
+            if (this.current !== current || current.document.isDirty || current.document.version !== current.version ||
                 current.repository.state.HEAD?.commit !== current.commit || !Buffer.from(disk).equals(Buffer.from(text, 'utf8'))) {
                 throw new Error('工作区文件已变更；未丢弃修订。');
             }
         }
         const patch = Diff.createTwoFilesPatch(`a/${current.file}`, `b/${current.file}`, current.staged ? text : current.original, next, '', '');
-        await new Promise<void>((resolve, reject) => {
-            const child = spawn(current.gitPath, ['apply', current.staged ? '--index' : '--cached', '--whitespace=nowarn', '-'], { cwd: current.repository.rootUri.fsPath });
+        const git = (args: string[], input?: string) => new Promise<void>((resolve, reject) => {
+            const child = spawn(current.gitPath, args, { cwd: current.repository.rootUri.fsPath });
             let error = '';
             child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-4096); });
             child.on('error', reject);
             child.on('close', code => code === 0 ? resolve() : reject(new Error(error.trim() || 'Git could not stage this revision.')));
             child.stdin.on('error', () => {});
-            child.stdin.end(patch);
+            child.stdin.end(input);
         });
+        // Rewritten files with unchanged content leave stale stat data, which `git apply --index` rejects.
+        if (current.staged) { await git(['update-index', '-q', '--refresh']); }
+        await git(['apply', current.staged ? '--index' : '--cached', '--whitespace=nowarn', '-'], patch);
         this.schedule();
         if (current.staged && current.document.isDirty) {
             throw new Error('已丢弃暂存区和磁盘中的修订；编辑器有未保存的修改，请检查后保存。');

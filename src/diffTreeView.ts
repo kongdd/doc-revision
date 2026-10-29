@@ -17,7 +17,9 @@ export class DiffTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
             const position = new vscode.TreeItem(`修订 ${index || (total ? '—' : 0)} / ${total}`, vscode.TreeItemCollapsibleState.None);
             position.iconPath = new vscode.ThemeIcon('list-ordered');
             return [position, this.item('上一处', '', 'arrow-up', 'diffTracker.previousChange'),
-                this.item('下一处', '', 'arrow-down', 'diffTracker.nextChange')];
+                this.item('下一处', '', 'arrow-down', 'diffTracker.nextChange'),
+                this.item('全部接受', '', 'check-all', 'diffTracker.acceptAllRevisions'),
+                this.item('全部拒绝', '', 'discard', 'diffTracker.rejectAllRevisions')];
         }
         const enabled = this.isEnabled();
         const highlight = revisionConfig().get<boolean>('highlightModifiedLines', false);

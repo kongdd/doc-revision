@@ -24,7 +24,9 @@ test('sidebar shows only revision controls and defaults to no modified-line back
     assert.equal(items[2].iconPath.id, 'check');
     assert.equal(items[3].command.command, 'diffTracker.showAllChanges');
     const navigation = new module.exports.DiffTreeDataProvider(() => true, () => ({ index: 2, total: 5 }), true).getChildren();
-    assert.deepEqual(Array.from(navigation, item => item.label), ['修订 2 / 5', '上一处', '下一处']);
+    assert.deepEqual(Array.from(navigation, item => item.label), ['修订 2 / 5', '上一处', '下一处', '全部接受', '全部拒绝']);
+    assert.equal(navigation[3].command.command, 'diffTracker.acceptAllRevisions');
+    assert.equal(navigation[4].command.command, 'diffTracker.rejectAllRevisions');
     vscode.workspace.getConfiguration = () => ({ get: () => true });
     assert.equal(new module.exports.DiffTreeDataProvider(() => true, () => ({ index: 0, total: 5 })).getChildren()[1].iconPath.id, 'eye');
     const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));

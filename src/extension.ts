@@ -45,6 +45,30 @@ export function activate(context: vscode.ExtensionContext): void {
             }
         }));
     }
+    for (const [action, scope] of [['accept', 'AllRevisions'], ['reject', 'AllRevisions'], ['accept', 'Selection'], ['reject', 'Selection']] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${action}${scope}`, async () => {
+            const editor = revisionEditor();
+            const ref = editor && revisions.getAllRevisions(editor.document);
+            if (!ref) { void vscode.window.showInformationMessage('当前文件没有可处理的修订。'); return; }
+            if (ref.mixed) { void vscode.window.showWarningMessage('暂存和未暂存的修改同时存在；请切换到 Show Unstaged。'); return; }
+            if (ref.staged && action === 'accept') { void vscode.window.showInformationMessage('修订已暂存，无法再次接受。'); return; }
+            const selected = scope === 'Selection';
+            if (selected && editor.selections.every(selection => selection.isEmpty)) { void vscode.window.showInformationMessage('请先选中要处理的行。'); return; }
+            if (!selected || ref.staged && action === 'reject') {
+                const title = action === 'accept' ? '接受' : '拒绝';
+                const detail = action === 'accept' ? '将当前编辑器内容暂存到 Git，不会保存文件。' : ref.staged
+                    ? '将同时丢弃暂存区和磁盘中的修订，此操作无法撤销。'
+                    : '将恢复到暂存区内容；修改仅作用于编辑器，需保存文件。';
+                const confirmed = await vscode.window.showWarningMessage(`${title}${selected ? '选区内' : '当前文件'}的所有修订？`, { modal: true, detail: `${ref.file}\n${detail}` }, title);
+                if (confirmed !== title) { return; }
+            }
+            try {
+                await revisions.applyAllRevisions(ref, action, selected ? editor.selections : undefined);
+            } catch (error) {
+                void vscode.window.showWarningMessage(`无法处理修订：${error instanceof Error ? error.message : String(error)}`);
+            }
+        }));
+    }
     for (const [command, direction] of [['previous', -1], ['next', 1]] as const) {
         context.subscriptions.push(vscode.commands.registerCommand(`diffTracker.${command}Change`, async () => {
             if (!decorations.gitRevisionMode) {
