@@ -43,13 +43,13 @@ interface GitTextBlock {
     newEnd: number;
 }
 
-function getPureBlocks(original: string, current: string, all = false): GitTextBlock[] {
+function getTextBlocks(original: string, current: string): GitTextBlock[] {
     const blocks: GitTextBlock[] = [];
     let oldOffset = 0;
     let newOffset = 0;
     let block: GitTextBlock | undefined;
     const finish = () => {
-        if (block && (all || block.oldStart === block.oldEnd || block.newStart === block.newEnd)) { blocks.push(block); }
+        if (block) { blocks.push(block); }
         block = undefined;
     };
     for (const part of Diff.diffLines(original, current)) {
@@ -67,6 +67,39 @@ function getPureBlocks(original: string, current: string, all = false): GitTextB
     return blocks;
 }
 
+/** Split replacements by line before filtering, so a selection never expands to a whole hunk. */
+function selectBlocks(blocks: readonly GitTextBlock[], original: string, text: string, spans: readonly number[][]): GitTextBlock[] {
+    const selected: GitTextBlock[] = [];
+    const add = (block: GitTextBlock) => {
+        const { newStart, newEnd } = block;
+        // Deleted text belongs to the preceding line (or the first line at offset zero).
+        const anchor = Math.max(0, newStart - 1);
+        if (!spans.some(([start, end]) => newStart === newEnd
+            ? start <= anchor && (anchor < end || start === end && anchor === start)
+            : start < newEnd && end > newStart)) { return; }
+        const last = selected[selected.length - 1];
+        if (last && last.oldEnd === block.oldStart && last.newEnd === newStart) {
+            last.oldEnd = block.oldEnd;
+            last.newEnd = newEnd;
+        } else { selected.push({ ...block }); }
+    };
+    for (const block of blocks) {
+        if (block.newStart === block.newEnd) { add(block); continue; }
+        const oldLines = original.slice(block.oldStart, block.oldEnd).match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const newLines = text.slice(block.newStart, block.newEnd).match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        let oldStart = block.oldStart;
+        let newStart = block.newStart;
+        for (let i = 0; i < Math.max(oldLines.length, newLines.length); i++) {
+            const oldEnd = oldStart + (oldLines[i]?.length ?? 0);
+            const newEnd = newStart + (newLines[i]?.length ?? 0);
+            add({ oldStart, oldEnd, newStart, newEnd });
+            oldStart = oldEnd;
+            newStart = newEnd;
+        }
+    }
+    return selected;
+}
+
 export class GitRevision implements vscode.Disposable {
     private enabled = false;
     private request = 0;
@@ -80,6 +113,7 @@ export class GitRevision implements vscode.Disposable {
     private api?: GitApi;
     private apiListeners: vscode.Disposable[] = [];
     private current?: { document: vscode.TextDocument; version: number; changes: LineChange[]; original: string;
+        blocks?: GitTextBlock[]; pureBlocks?: GitTextBlock[];
         staged: boolean; mixed: boolean; index: string; request: number; repository: Repository; commit: string; file: string; gitPath: string };
     private readonly log = vscode.window.createOutputChannel('Git Revisions', { log: true });
     private readonly subscriptions: vscode.Disposable[];
@@ -212,6 +246,13 @@ export class GitRevision implements vscode.Disposable {
         }
     }
 
+    private getBlocks(current: NonNullable<GitRevision['current']>, pure = false): readonly GitTextBlock[] {
+        // The snapshot is replaced on document/Git refresh; hover and actions share its lazy diff.
+        current.blocks ??= getTextBlocks(current.original, current.document.getText());
+        return pure ? current.pureBlocks ??= current.blocks.filter(block =>
+            block.oldStart === block.oldEnd || block.newStart === block.newEnd) : current.blocks;
+    }
+
     public getInlineRevision(document: vscode.TextDocument, position: vscode.Position): GitInlineRevision | undefined {
         const current = this.current;
         if (!current || current.document !== document || current.version !== document.version || !this.enabled) { return; }
@@ -224,7 +265,7 @@ export class GitRevision implements vscode.Disposable {
                 originalLine: change.originalLineNumber - 1, index }; }
         }
         const offset = document.offsetAt(position);
-        const blocks = getPureBlocks(current.original, document.getText());
+        const blocks = this.getBlocks(current, true);
         const block = blocks.findIndex(item => item.newStart === item.newEnd
             ? offset === item.newStart || (item.newStart > 0 && offset === item.newStart - 1)
             : offset >= item.newStart && offset <= item.newEnd);
@@ -237,7 +278,7 @@ export class GitRevision implements vscode.Disposable {
         const current = this.current;
         if (!this.enabled || !current || current.document !== document || current.version !== document.version) { return; }
         if (ref?.block !== undefined) {
-            const block = getPureBlocks(current.original, document.getText())[ref.block];
+            const block = this.getBlocks(current, true)[ref.block];
             return block && current.original.slice(block.oldStart, block.oldEnd) || undefined;
         }
         const change = current.changes.find(item => item.type === 'modified' && item.lineNumber === position.line + 1 &&
@@ -256,10 +297,9 @@ export class GitRevision implements vscode.Disposable {
             throw new Error('Revision is stale; review it again.');
         }
         if (current.staged && action === 'accept') { throw new Error('Staged revisions cannot be accepted again.'); }
-        const text = current.document.getText();
         let oldStart: number, oldEnd: number, newStart: number, newEnd: number;
         if (ref.block !== undefined) {
-            const block = getPureBlocks(current.original, text)[ref.block];
+            const block = this.getBlocks(current, true)[ref.block];
             if (!block) { throw new Error('Revision is stale; review it again.'); }
             ({ oldStart, oldEnd, newStart, newEnd } = block);
         } else {
@@ -304,8 +344,8 @@ export class GitRevision implements vscode.Disposable {
         const document = current.document;
         const lines = selections?.map(range => [range.start.line, range.end.line > range.start.line && !range.end.character ? range.end.line - 1 : range.end.line]);
         const spans = lines?.map(([start, end]) => [document.offsetAt(new vscode.Position(start, 0)), document.offsetAt(document.lineAt(end).rangeIncludingLineBreak.end)]);
-        const blocks = getPureBlocks(current.original, document.getText(), true).filter(block => !spans || spans.some(([start, end]) =>
-            block.newStart === block.newEnd ? start <= block.newStart && block.newStart <= end : start < block.newEnd && end > block.newStart));
+        const all = this.getBlocks(current);
+        const blocks = spans ? selectBlocks(all, current.original, document.getText(), spans) : all;
         if (!blocks.length) { throw new Error('选区内没有修订。'); }
         await this.applyRange(current, action, blocks);
     }
@@ -340,9 +380,25 @@ export class GitRevision implements vscode.Disposable {
             reverted = reverted.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + reverted.slice(newEnd);
         }
         if (action === 'reject' && !current.staged) {
-            // Staged and unstaged changes coexist: also unstage this revision when the index still holds it.
+            // Plan all index changes before writing: a failed reverse patch is not proof of an unstaged revision.
             if (current.mixed) {
-                await git(apply('--cached', '--check'), patch(text, reverted)).then(() => git(apply('--cached'), patch(text, reverted)), () => undefined);
+                let rejectedIndex = indexText;
+                for (const { oldStart, oldEnd, newStart, newEnd } of [...blocks].reverse()) {
+                    const restored = text.slice(0, newStart) + current.original.slice(oldStart, oldEnd) + text.slice(newEnd);
+                    const result = Diff.applyPatch(rejectedIndex, patch(text, restored), { autoConvertLineEndings: false });
+                    if (result !== false) { rejectedIndex = result; }
+                    else if (Diff.applyPatch(rejectedIndex, patch(restored, text), { autoConvertLineEndings: false }) === false) {
+                        throw new Error('该修订与暂存区中的修改冲突，未拒绝任何修订。');
+                    }
+                }
+                if (this.current !== current || current.document.version !== current.version ||
+                    current.repository.state.HEAD?.commit !== current.commit) {
+                    throw new Error('Index or document changed; review again.');
+                }
+                if (rejectedIndex !== indexText) { await git(apply('--cached'), patch(indexText, rejectedIndex)); }
+            }
+            if (this.current !== current || current.document.version !== current.version) {
+                throw new Error('编辑器已变化，未修改正文；请检查暂存区后重试。');
             }
             const edit = new vscode.WorkspaceEdit();
             for (const { oldStart, oldEnd, newStart, newEnd } of blocks) {
