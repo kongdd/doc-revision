@@ -73,6 +73,9 @@ export class GitRevision implements vscode.Disposable {
     private timer?: ReturnType<typeof setTimeout>;
     private repositoryListener?: vscode.Disposable;
     private renderedEditor?: vscode.TextEditor;
+    // Index/HEAD contents only change with Git state, so typing must not spawn Git reads.
+    private cache?: { repository: Repository; commit: string; file: string; showAll: boolean; index: string; head?: string };
+    private epoch = 0;
     private repository?: Repository;
     private api?: GitApi;
     private apiListeners: vscode.Disposable[] = [];
@@ -94,7 +97,7 @@ export class GitRevision implements vscode.Disposable {
             vscode.workspace.onDidChangeConfiguration(event => {
                 if (event.affectsConfiguration('diffTracker.showRevisions')) { void this.sync(); }
                 else if (event.affectsConfiguration('diffTracker.showAllChanges')) { void this.sync(true); }
-                else if (event.affectsConfiguration('diffTracker')) { this.schedule(); }
+                else if (event.affectsConfiguration('diffTracker')) { this.invalidate(); }
             }),
             vscode.workspace.onDidChangeTextDocument(event => {
                 if (event.document === revisionEditor()?.document) { this.schedule(); }
@@ -119,6 +122,7 @@ export class GitRevision implements vscode.Disposable {
             await this.refresh(notify);
         } else {
             this.request++;
+            this.cache = undefined;
             clearTimeout(this.timer);
             this.repositoryListener?.dispose();
             this.repositoryListener = undefined;
@@ -129,11 +133,15 @@ export class GitRevision implements vscode.Disposable {
         }
     }
 
+    private invalidate(delay = 50) {
+        this.cache = undefined;
+        this.epoch++;
+        this.schedule(delay);
+    }
+
     private schedule(delay = 50) {
         if (!this.enabled) { return; }
         this.request++;
-        this.current = undefined;
-        this.onChange();
         clearTimeout(this.timer);
         this.timer = setTimeout(() => void this.refresh(), delay);
     }
@@ -141,14 +149,16 @@ export class GitRevision implements vscode.Disposable {
     private async refresh(notify = false) {
         if (!this.enabled) { return; }
         const request = ++this.request;
-        this.current = undefined;
-        this.onChange();
         const editor = revisionEditor();
         if (this.renderedEditor && this.renderedEditor !== editor) {
             this.decorations.clearAllDecorations();
             this.renderedEditor = undefined;
         }
-        if (!editor || editor.document.uri.scheme !== 'file') { return; }
+        if (!editor || editor.document.uri.scheme !== 'file') {
+            this.current = undefined;
+            this.onChange();
+            return;
+        }
         const version = editor.document.version;
         const started = Date.now();
         this.log.info(`refresh #${request} start`);
@@ -160,20 +170,27 @@ export class GitRevision implements vscode.Disposable {
             if (api !== this.api) {
                 this.apiListeners.forEach(listener => listener.dispose());
                 this.api = api;
-                this.apiListeners = [api.onDidOpenRepository(() => this.schedule(0)), api.onDidChangeState(() => this.schedule(0))];
+                this.apiListeners = [api.onDidOpenRepository(() => this.invalidate(0)), api.onDidChangeState(() => this.invalidate(0))];
             }
             const repository = api.getRepository(editor.document.uri);
             if (!repository) { throw new Error('The current file is not in an open Git repository.'); }
             if (repository !== this.repository) {
                 this.repositoryListener?.dispose();
                 this.repository = repository;
-                this.repositoryListener = repository.state.onDidChange(() => this.schedule(this.current ? 50 : 0));
+                this.repositoryListener = repository.state.onDidChange(() => this.invalidate(this.current ? 50 : 0));
             }
             const commit = repository.state.HEAD?.commit;
             if (!commit) { throw new Error('The Git repository has no commit yet.'); }
             const file = path.relative(repository.rootUri.fsPath, editor.document.uri.fsPath).split(path.sep).join('/');
             const showAll = revisionConfig().get<boolean>('showAllChanges', false);
-            const [index, head] = await Promise.all([repository.show('', file), showAll ? repository.show(commit, file) : undefined]);
+            let base = this.cache;
+            if (!base || base.repository !== repository || base.commit !== commit || base.file !== file || base.showAll !== showAll) {
+                const epoch = this.epoch;
+                const [index, head] = await Promise.all([repository.show('', file), showAll ? repository.show(commit, file) : undefined]);
+                base = { repository, commit, file, showAll, index, head };
+                if (epoch === this.epoch) { this.cache = base; }
+            }
+            const { index, head } = base;
             const original = head ?? index;
             this.log.info(`refresh #${request} Git read ${Date.now() - started}ms`);
             if (!this.enabled || request !== this.request || editor !== revisionEditor() || version !== editor.document.version) { return; }
@@ -193,6 +210,8 @@ export class GitRevision implements vscode.Disposable {
         } catch (error) {
             this.log.warn(`refresh #${request}: ${error instanceof Error ? error.message : String(error)}`);
             if (this.enabled && request === this.request) {
+                this.current = undefined;
+                this.onChange();
                 this.decorations.clearAllDecorations();
                 this.renderedEditor = undefined;
                 this.status.tooltip = `Git revisions unavailable: ${error instanceof Error ? error.message : String(error)}`;
@@ -359,7 +378,8 @@ export class GitRevision implements vscode.Disposable {
         }
         await git(apply(current.staged ? '--index' : '--cached'), current.staged ? patch(text, reverted) : patch(current.original, accepted))
             .catch(error => { throw current.mixed ? new Error('该修订与暂存区中相邻的修改冲突，无法单独接受。') : error; });
-        this.schedule();
+        this.current = undefined;
+        this.invalidate();
         if (current.staged && current.document.isDirty) {
             throw new Error('已丢弃暂存区和磁盘中的修订；编辑器有未保存的修改，请检查后保存。');
         }

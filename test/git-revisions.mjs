@@ -96,16 +96,32 @@ test('keeps decorations visible while refreshing and clears them when disabled',
     assert.equal(h.renders.length, 1);
     clears = 0;
     pending = true;
-    const refresh = h.events.editor();
+    h.events.git();
+    await new Promise(resolve => setTimeout(resolve, 120));
     assert.equal(clears, 0);
     assert.equal(h.renders.length, 1);
     resolveRead('committed');
-    await refresh;
-    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(h.renders.length, 2);
     assert.equal(clears, 0);
     await h.events.toggle();
     assert.equal(clears, 1);
+    h.instance.dispose();
+});
+
+test('typing reuses cached Git content and Git state changes reload it', async () => {
+    let reads = 0;
+    const h = setup(async () => { reads++; return 'committed'; });
+    await h.events.toggle();
+    assert.equal(reads, 1);
+    h.document.version++;
+    h.events.document({ document: h.document });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(reads, 1);
+    assert.equal(h.renders.length, 2);
+    h.events.git();
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(reads, 2);
     h.instance.dispose();
 });
 
